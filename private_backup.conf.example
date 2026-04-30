@@ -1,0 +1,56 @@
+# ============================================================
+# private_backup.conf — Configurazione di private_backup.sh
+#
+# Copia questo file in:
+#   ~/.config/privatebackup/private_backup.conf
+# e adattalo al tuo ambiente.
+# ============================================================
+
+# ------------------------------------------------------------
+# File e cartelle locali da includere nel backup
+# Percorsi assoluti — file o directory (entrambi accettati)
+# ------------------------------------------------------------
+BACKUP_ITEMS=(
+    "${HOME}/.ssh"
+    "${HOME}/.gnupg"
+    "${HOME}/.config/privatebackup"
+    "${HOME}/.bashrc"
+    # Aggiungi qui altri percorsi locali
+)
+
+# ------------------------------------------------------------
+# Ricerca automatica di sottocartelle
+# Formato: "directory_base:nome_sottocartella"
+# Trova ricorsivamente tutte le dir con quel nome sotto la base.
+# Utile per includere automaticamente nuove cartelle senza
+# toccare il config.
+# ------------------------------------------------------------
+BACKUP_FIND_DIRS=(
+    # "${HOME}/projects:.env"
+)
+
+# ------------------------------------------------------------
+# Backup da host remoti via SSH (ssh + tar, nessun rsync richiesto)
+# Formato: "user@host:/percorso/assoluto"
+# Funziona sia con file singoli che con directory intere.
+# ------------------------------------------------------------
+SSH_KEY="${HOME}/.ssh/id_rsa"
+
+BACKUP_REMOTE_ITEMS=(
+    # "root@server1.lan:/root/.env"
+    # "root@server1.lan:/root/myapp"
+    # "user@server2.lan:/etc/myconfig"
+)
+
+# ------------------------------------------------------------
+# Cifratura GPG
+# true  → cifra con AES256, password chiesta a runtime
+# false → nessuna cifratura (archivio .tar.gz in chiaro)
+# ------------------------------------------------------------
+BACKUP_ENCRYPT=true
+
+# ------------------------------------------------------------
+# Destinazione locale e percorso remote rclone
+# ------------------------------------------------------------
+BACKUP_DEST_DIR="${HOME}/backups/private"
+RCLONE_REMOTE_PATH="gdrive:Backup/private"

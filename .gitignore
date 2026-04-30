@@ -1,0 +1,8 @@
+*.tar.gz
+*.tar.gz.gpg
+*.sha256
+private_backup.log
+folder_snapshot.txt
+.remote_stage/
+restore/
+private_backup.conf
