@@ -43,6 +43,17 @@ BACKUP_REMOTE_ITEMS=(
 )
 
 # ------------------------------------------------------------
+# Recupero automatico file Docker remoti
+# Cerca .env, docker-compose*.yml/.yaml, compose*.yml/.yaml
+# e directory .secrets sotto i path indicati.
+# ------------------------------------------------------------
+# BACKUP_REMOTE_DOCKER_HOSTS=(
+#     "root@server1.lan"
+# )
+#
+# BACKUP_REMOTE_DOCKER_SEARCH_DIRS="/root /home /opt /srv /var/www"
+#
+# ------------------------------------------------------------
 # Cifratura GPG
 # true  → cifra con AES256, password chiesta a runtime
 # false → nessuna cifratura (archivio .tar.gz in chiaro)

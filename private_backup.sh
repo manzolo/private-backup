@@ -203,6 +203,16 @@ _pause_if_needed() {
     echo ""
 }
 
+finish_operation_notice() {
+    local message="${1:-Operazione completata.}"
+    if [ "${USE_DIALOG}" = true ]; then
+        dialog_msgbox "${message}\n\nTorno al menu principale." 10 80
+    else
+        echo ""
+        _pause_if_needed "${message} Premi un tasto per tornare al menu... "
+    fi
+}
+
 # Reset completo del terminale (incluso scrollback) per evitare residui ANSI
 # da comandi che usano cursor movement (es. rclone --progress).
 _terminal_reset() {
@@ -394,8 +404,9 @@ recupera_remoti() {
 
 # ============================================================
 # Funzione: recupera_remoti_docker
-# Scarica via SSH i file .env e docker-compose* da host remoti.
-# Individua i file tramite find: non servono percorsi specifici.
+# Scarica via SSH i file .env, docker-compose* e le directory .secrets
+# da host remoti. Individua i percorsi tramite find: non servono
+# percorsi specifici per ogni progetto.
 # ============================================================
 recupera_remoti_docker() {
     [[ -z "${BACKUP_REMOTE_DOCKER_HOSTS+x}" || ${#BACKUP_REMOTE_DOCKER_HOSTS[@]} -eq 0 ]] && return 0
@@ -405,7 +416,7 @@ recupera_remoti_docker() {
     local search_dirs="${BACKUP_REMOTE_DOCKER_SEARCH_DIRS:-/root /home /opt /srv /var/www}"
     local skipped=0 tmp_tar ssh_status count
 
-    echo "Recupero .env e docker-compose da host remoti..."
+    echo "Recupero .env, docker-compose e .secrets da host remoti..."
     echo "$(date): Avvio recupero Docker remoti" >>"${LOG_FILE}"
 
     for userhost in "${BACKUP_REMOTE_DOCKER_HOSTS[@]}"; do
@@ -416,12 +427,13 @@ recupera_remoti_docker() {
         echo "$userhost" > "${stagedir}/.userhost"
         tmp_tar=$(mktemp /tmp/private_docker_XXXXXX.tar.gz)
 
-        # find sul remoto, xargs -r evita tar con lista vuota
+        # find sul remoto, xargs -r evita tar con lista vuota.
+        # Non usiamo --no-recursion per includere il contenuto di .secrets.
         ssh "${ssh_opts[@]}" "$userhost" \
             "find ${search_dirs} -maxdepth 6 \
              \( -name '.env' -o -name 'docker-compose.yml' -o -name 'docker-compose.yaml' \
-                -o -name 'compose.yml'    -o -name 'compose.yaml' \) 2>/dev/null \
-             | xargs -r tar -czf - --no-recursion 2>/dev/null" \
+                -o -name 'compose.yml' -o -name 'compose.yaml' -o -name '.secrets' \) \
+             2>/dev/null | xargs -r tar -czf - 2>/dev/null" \
             > "$tmp_tar" 2>>"${LOG_FILE}"
         ssh_status=$?
 
@@ -488,30 +500,42 @@ snapshot_cartelle() {
     local date_str archive_name total_bytes total_bytes_fmt
     local roots_json="" entries path_esc label_esc root_bytes is_dir bytes fpath fp_esc
     local path host_dir hostname userhost item rel
+    local preview_limit_bytes=8192 preview_count=0 preview_count_limit=120
+    local preview_always_bytes=1024
 
     date_str=$(date '+%d/%m/%Y %H:%M:%S')
     archive_name=$(basename "${BACKUP_FILE}")
     total_bytes=0
 
+    echo "Generazione snapshot HTML interattivo..."
+
     # --- Percorsi locali ---
     for path in "${VALID_INCLUDE_PATHS[@]}"; do
         [[ "$path" == "${REMOTE_STAGE_DIR}"* ]] && continue
         [ -e "$path" ] || continue
+        echo "  [locale] $path"
         entries=""
-        root_bytes=0
+        root_bytes="$(du -sb "$path" 2>/dev/null | cut -f1)"
+        root_bytes="${root_bytes:-0}"
         while IFS=$'\t' read -r bytes fpath; do
             [ -n "$fpath" ] || continue
             bytes="${bytes:-0}"
             fp_esc="$(_json_escape "$fpath")"
             is_dir=0; [ -d "$fpath" ] && is_dir=1
-            _cf=""; [ "$is_dir" -eq 0 ] && { _ct="$(_read_text_content "$fpath" "$bytes")"; [ -n "$_ct" ] && _cf=",\"c\":\"${_ct}\""; }
+            _cf=""
+            if [ "$is_dir" -eq 0 ] && [ "${bytes:-0}" -le "$preview_limit_bytes" ] && { [ "${bytes:-0}" -le "$preview_always_bytes" ] || [ "$preview_count" -lt "$preview_count_limit" ]; }; then
+                _ct="$(_read_text_content "$fpath" "$bytes")"
+                if [ -n "$_ct" ]; then
+                    _cf=",\"c\":\"${_ct}\""
+                    [ "${bytes:-0}" -gt "$preview_always_bytes" ] && ((preview_count++))
+                fi
+            fi
             entries+="{\"b\":${bytes},\"p\":\"${fp_esc}\",\"d\":${is_dir}${_cf}},"
-            [ "$fpath" = "$path" ] && root_bytes="$bytes"
         done < <(du -ab --max-depth=5 "$path" 2>/dev/null | head -n 8000)
         entries="${entries%,}"
-        label_esc="$(_json_escape "[locale] $path")"
+        label_esc="$(_json_escape "$path")"
         path_esc="$(_json_escape "$path")"
-        roots_json+="{\"label\":\"${label_esc}\",\"root\":\"${path_esc}\",\"entries\":[${entries}]},"
+        roots_json+="{\"type\":\"local\",\"group\":\"Locale\",\"label\":\"${label_esc}\",\"root\":\"${path_esc}\",\"entries\":[${entries}]},"
         (( total_bytes += root_bytes )) || true
     done
 
@@ -523,21 +547,29 @@ snapshot_cartelle() {
             while IFS= read -r item; do
                 [ -e "$item" ] || continue
                 rel="/${item#${host_dir}/}"
+                echo "  [remoto:${userhost}] ${rel}"
                 entries=""
-                root_bytes=0
+                root_bytes="$(du -sb "$item" 2>/dev/null | cut -f1)"
+                root_bytes="${root_bytes:-0}"
                 while IFS=$'\t' read -r bytes fpath; do
                     [ -n "$fpath" ] || continue
                     bytes="${bytes:-0}"
                     fp_esc="$(_json_escape "$fpath")"
                     is_dir=0; [ -d "$fpath" ] && is_dir=1
-                    _cf=""; [ "$is_dir" -eq 0 ] && { _ct="$(_read_text_content "$fpath" "$bytes")"; [ -n "$_ct" ] && _cf=",\"c\":\"${_ct}\""; }
+                    _cf=""
+                    if [ "$is_dir" -eq 0 ] && [ "${bytes:-0}" -le "$preview_limit_bytes" ] && { [ "${bytes:-0}" -le "$preview_always_bytes" ] || [ "$preview_count" -lt "$preview_count_limit" ]; }; then
+                        _ct="$(_read_text_content "$fpath" "$bytes")"
+                        if [ -n "$_ct" ]; then
+                            _cf=",\"c\":\"${_ct}\""
+                            [ "${bytes:-0}" -gt "$preview_always_bytes" ] && ((preview_count++))
+                        fi
+                    fi
                     entries+="{\"b\":${bytes},\"p\":\"${fp_esc}\",\"d\":${is_dir}${_cf}},"
-                    [ "$fpath" = "$item" ] && root_bytes="$bytes"
                 done < <(du -ab --max-depth=5 "$item" 2>/dev/null | head -n 8000)
                 entries="${entries%,}"
-                label_esc="$(_json_escape "[${userhost}] ${rel}")"
+                label_esc="$(_json_escape "${userhost} ${rel}")"
                 path_esc="$(_json_escape "$item")"
-                roots_json+="{\"label\":\"${label_esc}\",\"root\":\"${path_esc}\",\"entries\":[${entries}]},"
+                roots_json+="{\"type\":\"remote\",\"group\":\"Remoto\",\"host\":\"$(_json_escape "$userhost")\",\"label\":\"${label_esc}\",\"root\":\"${path_esc}\",\"entries\":[${entries}]},"
                 (( total_bytes += root_bytes )) || true
             done < <(find "$host_dir" -mindepth 1 -maxdepth 1 -not -name '.userhost' 2>/dev/null | sort)
         done < <(find "${REMOTE_STAGE_DIR}" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort)
@@ -561,6 +593,22 @@ body{background:#0d1117;color:#e6edf3;font-family:'Courier New',Consolas,monospa
 .hdr h1{color:#58a6ff;font-size:1.15em;margin-bottom:10px;letter-spacing:.02em}
 .hdr .m{color:#8b949e;font-size:.9em;margin-top:4px}
 .hdr .tot{color:#3fb950;font-weight:bold;margin-top:10px;font-size:1em}
+.hdr .sub{color:#6e7681;font-size:.8em;margin-top:6px}
+.tb{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:16px}
+.vw{display:flex;gap:8px;align-items:center}
+.vbtn{background:#161b22;border:1px solid #30363d;border-radius:999px;color:#8b949e;padding:8px 14px;cursor:pointer;font-size:.84em;transition:all .12s}
+.vbtn:hover{background:#21262d;color:#e6edf3}
+.vbtn.on{background:#1f6feb;border-color:#388bfd;color:#fff}
+.sec{margin-bottom:22px}
+.sec-h{display:flex;align-items:center;gap:10px;background:#11161d;border:1px solid #30363d;border-radius:10px;padding:10px 14px;margin-bottom:12px;color:#79c0ff;font-size:.9em;font-weight:bold;letter-spacing:.03em}
+.sec-m{color:#8b949e;font-size:.78em;font-weight:normal}
+.bc{display:none;gap:8px;align-items:center;flex-wrap:wrap;background:#161b22;border:1px solid #30363d;border-radius:10px;padding:10px 14px;margin-bottom:16px}
+.bc.show{display:flex}
+.bc-lbl{color:#8b949e;font-size:.8em;text-transform:uppercase;letter-spacing:.08em}
+.bc-items{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.bc-btn{background:#21262d;border:1px solid #30363d;border-radius:6px;color:#79c0ff;padding:5px 10px;cursor:pointer;font-size:.82em}
+.bc-btn:hover{background:#30363d;color:#fff}
+.bc-sep{color:#6e7681}
 .src{background:#161b22;border:1px solid #30363d;border-radius:10px;margin-bottom:14px;overflow:hidden}
 .src-hdr{background:#21262d;padding:10px 16px;font-weight:bold;color:#79c0ff;border-bottom:1px solid #30363d;font-size:.88em;letter-spacing:.03em}
 .tree{padding:4px 0}
@@ -591,6 +639,23 @@ body{background:#0d1117;color:#e6edf3;font-family:'Courier New',Consolas,monospa
 .rp{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:.88em}
 .rl{color:#8b949e;font-size:.76em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .no-res{padding:20px;color:#8b949e;text-align:center;font-size:.9em}
+.fd{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:16px;margin-bottom:22px}
+.card{background:#161b22;border:1px solid #30363d;border-radius:14px;padding:16px;transition:all .12s}
+.card:hover{border-color:#3d444d;transform:translateY(-1px)}
+.card.dir{cursor:pointer}
+.card-h{display:flex;align-items:flex-start;gap:10px;margin-bottom:12px}
+.card-ic{font-size:1.2em}
+.card-ti{flex:1;min-width:0;font-size:.95em;color:#e6edf3;line-height:1.45;word-break:break-word;white-space:normal}
+.card-meta{display:flex;justify-content:space-between;gap:10px;color:#8b949e;font-size:.78em;margin-top:10px}
+.card-path{color:#6e7681;font-size:.76em;line-height:1.55;word-break:break-all;min-height:44px}
+.card-act{display:flex;justify-content:flex-end;align-items:center;gap:8px;margin-top:14px}
+.card-open{background:#1f2937;border:1px solid #30363d;border-radius:8px;color:#79c0ff;padding:6px 10px;font-size:.8em;cursor:pointer}
+.card-open:hover{background:#1f6feb;border-color:#388bfd;color:#fff}
+.card-note{color:#6e7681;font-size:.76em}
+.flsec{margin-bottom:22px}
+.flttl{color:#79c0ff;font-size:.86em;font-weight:bold;letter-spacing:.04em;margin-bottom:10px}
+.flgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(360px,1fr));gap:14px}
+.empty{background:#161b22;border:1px dashed #30363d;border-radius:12px;padding:24px;color:#8b949e;text-align:center}
 .prv{flex-shrink:0;cursor:pointer;font-size:1em;padding:4px 10px;border-radius:5px;color:#79c0ff;background:#1f2937;border:1px solid #30363d;transition:all .12s;user-select:none;display:inline-flex;align-items:center;gap:5px;font-family:inherit}
 .prv::after{content:"Anteprima";font-size:.78em;color:#8b949e;letter-spacing:.02em}
 .prv:hover{color:#fff;background:#1f6feb;border-color:#388bfd}
@@ -613,13 +678,22 @@ HTMLEOF
         printf '  <div class="m">&#x1F4C5; Data: %s</div>\n' "$date_str"
         printf '  <div class="m">&#x1F4E6; Archivio: %s</div>\n' "$archive_name"
         printf '  <div class="tot">&#x1F4BE; Totale stimato (non compresso): %s</div>\n' "$total_bytes_fmt"
+        printf '  <div class="sub">Anteprime incluse: %s file testuali, max %s KiB ciascuno</div>\n' "$preview_count" "$((preview_limit_bytes/1024))"
         cat << 'HTMLEOF'
+</div>
+<div class="tb">
+  <div class="vw">
+    <button id="btn-tree" class="vbtn on" onclick="setView('tree')">Vista albero</button>
+    <button id="btn-folder" class="vbtn" onclick="setView('folder')">Vista cartelle</button>
+  </div>
 </div>
 <div class="fb">
   <input id="flt" type="text" placeholder="Filtra per nome: .env   *.log   id_rsa   authorized_keys ..." oninput="doFilter(this.value)">
   <button onclick="clearFilter()" title="Cancella filtro">&#x2715;</button>
 </div>
+<div id="crumbs" class="bc"></div>
 <div id="tree"></div>
+<div id="folders" style="display:none"></div>
 <div id="res" style="display:none"></div>
 <div id="prv-modal" class="mw" onclick="if(event.target===this)closePrv()">
   <div class="mb">
@@ -631,14 +705,23 @@ HTMLEOF
     <pre id="prv-pre"></pre>
   </div>
 </div>
-<script>
+<script id="snapshot-data" type="application/json">
 HTMLEOF
-        printf 'const ROOTS=%s;\n' "$roots_json"
+        printf '%s\n' "$roots_json"
         cat << 'HTMLEOF'
+</script>
+<script>
 let _i=0;
+const ROOTS=JSON.parse(document.getElementById('snapshot-data').textContent || '[]');
+let CURRENT_VIEW='tree';
+let CURRENT_ROOT=-1;
+let CURRENT_PATH='';
 function fmtB(b){b=+b;if(b>=1073741824)return(b/1073741824).toFixed(1)+' GiB';if(b>=1048576)return(b/1048576).toFixed(1)+' MiB';if(b>=1024)return(b/1024).toFixed(1)+' KiB';return b+' B';}
 function col(b){if(b>=1073741824)return'#f85149';if(b>=104857600)return'#f0883e';if(b>=10485760)return'#d29922';return'#3fb950';}
 function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
+function jsq(s){return JSON.stringify(String(s));}
+function rootsByType(type){return ROOTS.filter(r=>r.type===type);}
+function sectionHeader(title,count,extra=''){return `<div class="sec-h"><span>${esc(title)}</span><span class="sec-m">${count} radici${extra?` · ${esc(extra)}`:''}</span></div>`;}
 function buildTree(entries,root){
   const m={};
   for(const e of entries){
@@ -662,13 +745,13 @@ function rNode(n,pb,d){
   const coll=hk;
   const id='n'+(++_i);
   let h='<div>';
-  h+=`<div class="nr l${Math.min(d,6)}${hk?' hk':''}"${hk?` onclick="tg('${id}')" `:''}title="${esc(n.path)}">`;
+  h+=`<div class="nr l${Math.min(d,6)}${hk?' hk':''}"${hk?` onclick='tg(${jsq(id)})' `:''}title="${esc(n.path)}">`;
   h+=`<span class="tg" id="t${id}">${hk?(coll?'&#9654;':'&#9660;'):''}</span>`;
   h+=`<span class="ic">${isD?'&#x1F4C1;':'&#x1F4C4;'}</span>`;
   h+=`<div class="bw"><div class="b" style="width:${bw}%;background:${col(n.bytes)}"></div></div>`;
   h+=`<span class="sz">${fmtB(n.bytes)}</span>`;
   h+=`<span class="nm${isD?'':' f'}">${esc(n.name)}</span>`;
-  if(n.hasContent)h+=`<span class="prv" onclick="event.stopPropagation();showPrv('${esc(n.path)}')" title="Anteprima">&#x1F441;&#xFE0F;</span>`;
+  if(n.hasContent)h+=`<span class="prv" onclick='event.stopPropagation();showPrv(${jsq(n.path)})' title="Anteprima">&#x1F441;&#xFE0F;</span>`;
   h+='</div>';
   if(hk){
     h+=`<div id="${id}" class="ch"${coll?' style="display:none"':''}>`;
@@ -685,15 +768,176 @@ function tg(id){
   el.style.display=hidden?'':'none';
   if(ti)ti.innerHTML=hidden?'&#9660;':'&#9654;';
 }
+function setView(view){
+  CURRENT_VIEW=view;
+  const tree=document.getElementById('tree');
+  const folders=document.getElementById('folders');
+  const res=document.getElementById('res');
+  document.getElementById('btn-tree').classList.toggle('on',view==='tree');
+  document.getElementById('btn-folder').classList.toggle('on',view==='folder');
+  if(document.getElementById('flt').value.trim()){
+    tree.style.display='none';
+    folders.style.display='none';
+    res.style.display='';
+    updateBreadcrumbs();
+    return;
+  }
+  tree.style.display=view==='tree'?'':'none';
+  folders.style.display=view==='folder'?'':'none';
+  res.style.display='none';
+  updateBreadcrumbs();
+  if(view==='folder')renderFolderView();
+}
+function entryName(path){
+  return path.split('/').filter(Boolean).pop()||path;
+}
+function getCurrentRoot(){
+  return CURRENT_ROOT>=0?ROOTS[CURRENT_ROOT]:null;
+}
+function openRoot(idx){
+  CURRENT_ROOT=idx;
+  CURRENT_PATH=ROOTS[idx].root;
+  renderFolderView();
+}
+function openFolder(path){
+  CURRENT_PATH=path;
+  renderFolderView();
+}
+function goUp(){
+  const root=getCurrentRoot();
+  if(!root)return;
+  if(CURRENT_PATH===root.root){CURRENT_ROOT=-1;CURRENT_PATH='';renderFolderView();return;}
+  const clean=CURRENT_PATH.replace(/\/+$/,'');
+  const parent=clean.split('/').slice(0,-1).join('/')||root.root;
+  CURRENT_PATH=parent;
+  renderFolderView();
+}
+function updateBreadcrumbs(){
+  const bc=document.getElementById('crumbs');
+  if(CURRENT_VIEW!=='folder' || document.getElementById('flt').value.trim()){bc.className='bc';bc.innerHTML='';return;}
+  let html='<span class="bc-lbl">Percorso</span><div class="bc-items">';
+  html+=`<button class="bc-btn" onclick="CURRENT_ROOT=-1;CURRENT_PATH='';renderFolderView()">Origini</button>`;
+  const root=getCurrentRoot();
+  if(root){
+    html+='<span class="bc-sep">/</span>';
+    html+=`<button class="bc-btn" onclick="openRoot(${CURRENT_ROOT})">${esc(root.label)}</button>`;
+    if(CURRENT_PATH && CURRENT_PATH!==root.root){
+      const base=root.root.replace(/\/+$/,'');
+      const rel=CURRENT_PATH.startsWith(base+'/')?CURRENT_PATH.slice(base.length+1):'';
+      let accum=base;
+      for(const part of rel.split('/').filter(Boolean)){
+        accum+='/'+part;
+        html+='<span class="bc-sep">/</span>';
+        html+=`<button class="bc-btn" onclick='openFolder(${jsq(accum)})'>${esc(part)}</button>`;
+      }
+    }
+  }
+  html+='</div>';
+  bc.className='bc show';
+  bc.innerHTML=html;
+}
+function collectFolderItems(root,path){
+  const items=[];
+  const dirMap=new Map();
+  for(const e of root.entries){
+    if(e.p===path)continue;
+    if(!e.p.startsWith(path.replace(/\/+$/,'')+'/'))continue;
+    const rel=e.p.slice(path.replace(/\/+$/,'').length+1);
+    if(!rel)continue;
+    const first=rel.split('/')[0];
+    if(rel.includes('/')){
+      const childPath=path.replace(/\/+$/,'')+'/'+first;
+      const prev=dirMap.get(childPath);
+      if(!prev || +e.b>prev.bytes)dirMap.set(childPath,{name:first,path:childPath,bytes:+e.b,isDir:true,hasContent:false});
+      continue;
+    }
+    items.push({name:first,path:e.p,bytes:+e.b,isDir:e.d===1,hasContent:!!e.c});
+  }
+  for(const item of dirMap.values())items.push(item);
+  items.sort((a,b)=>{
+    if(a.isDir!==b.isDir)return a.isDir?-1:1;
+    if(b.bytes!==a.bytes)return b.bytes-a.bytes;
+    return a.name.localeCompare(b.name);
+  });
+  return items;
+}
+function folderCard(item){
+  const dbl=item.isDir?` ondblclick='openFolder(${jsq(item.path)})'`:` ondblclick='showPrv(${jsq(item.path)})'`;
+  let h=`<div class="card ${item.isDir?'dir':'file'}"${dbl} title="${esc(item.path)}">`;
+  h+=`<div class="card-h"><span class="card-ic">${item.isDir?'&#x1F4C1;':'&#x1F4C4;'}</span><div class="card-ti">${esc(item.name)}</div></div>`;
+  h+=`<div class="card-path">${esc(item.path)}</div>`;
+  h+=`<div class="card-meta"><span>${item.isDir?'Cartella':'File'}</span><span>${fmtB(item.bytes)}</span></div>`;
+  h+='<div class="card-act">';
+  if(item.isDir)h+=`<button class="card-open" onclick='event.stopPropagation();openFolder(${jsq(item.path)})'>Apri</button>`;
+  else if(item.hasContent)h+=`<span class="prv" onclick='event.stopPropagation();showPrv(${jsq(item.path)})' title="Apri anteprima">&#x1F441;&#xFE0F;</span>`;
+  else h+='<span class="card-note">Anteprima non disponibile</span>';
+  h+='</div></div>';
+  return h;
+}
+function rootCard(root,idx){
+  const bytes=(root.entries||[]).find(e=>e.p===root.root)?.b||0;
+  return `<div class="card dir" ondblclick="openRoot(${idx})" title="${esc(root.root)}">
+    <div class="card-h"><span class="card-ic">${root.type==='remote'?'&#x1F310;':'&#x1F5C2;&#xFE0F;'}</span><div class="card-ti">${esc(root.label)}</div></div>
+    <div class="card-path">${esc(root.root)}</div>
+    <div class="card-meta"><span>${root.type==='remote'?(root.host||'Remoto'):'Locale'}</span><span>${fmtB(bytes)}</span></div>
+    <div class="card-act"><button class="card-open" onclick="event.stopPropagation();openRoot(${idx})">Apri</button></div>
+  </div>`;
+}
+function renderFolderView(){
+  const el=document.getElementById('folders');
+  updateBreadcrumbs();
+  if(CURRENT_ROOT<0){
+    let out='';
+    const locals=rootsByType('local');
+    const remotes=rootsByType('remote');
+    if(locals.length){
+      out+=`<div class="sec"><div class="flttl">Origini locali</div>${sectionHeader('Locale', locals.length)}<div class="fd">`;
+      for(let i=0;i<ROOTS.length;i++)if(ROOTS[i].type==='local')out+=rootCard(ROOTS[i],i);
+      out+='</div></div>';
+    }
+    if(remotes.length){
+      out+=`<div class="sec"><div class="flttl">Origini remote</div>${sectionHeader('Remoto', remotes.length)}<div class="fd">`;
+      for(let i=0;i<ROOTS.length;i++)if(ROOTS[i].type==='remote')out+=rootCard(ROOTS[i],i);
+      out+='</div></div>';
+    }
+    el.innerHTML=out||'<div class="empty">Nessuna origine disponibile.</div>';
+    return;
+  }
+  const root=getCurrentRoot();
+  if(!root){el.innerHTML='<div class="empty">Radice non disponibile.</div>';return;}
+  const items=collectFolderItems(root,CURRENT_PATH);
+  const dirs=items.filter(i=>i.isDir);
+  const files=items.filter(i=>!i.isDir);
+  let out='';
+  out+=`<div class="flsec"><div class="flttl">Cartella corrente</div><div class="card"><div class="card-h"><span class="card-ic">&#x1F4CD;</span><div class="card-ti">${esc(CURRENT_PATH)}</div></div><div class="card-path">${esc(root.type==='remote'?(root.host+' · Remoto'):'Locale')}</div><div class="card-act"><button class="card-open" onclick="goUp()">Su di un livello</button></div></div></div>`;
+  if(!items.length){el.innerHTML=out+'<div class="empty">Nessun elemento visibile in questa cartella.</div>';return;}
+  if(dirs.length){
+    out+=`<div class="flsec"><div class="flttl">&#x1F4C1; Cartelle (${dirs.length})</div><div class="fd">`;
+    for(const item of dirs)out+=folderCard(item);
+    out+='</div></div>';
+  }
+  if(files.length){
+    out+=`<div class="flsec"><div class="flttl">&#x1F4C4; File (${files.length})</div><div class="flgrid">`;
+    for(const item of files)out+=folderCard(item);
+    out+='</div></div>';
+  }
+  el.innerHTML=out;
+}
 function globRe(q){
   const s=q.replace(/[.+^${}()|[\]\\]/g,'\\$&').replace(/\*/g,'.*').replace(/\?/g,'.');
   return new RegExp(s,'i');
 }
 function doFilter(q){
   const tree=document.getElementById('tree');
+  const folders=document.getElementById('folders');
   const res=document.getElementById('res');
   q=q.trim();
-  if(!q){tree.style.display='';res.style.display='none';res.innerHTML='';return;}
+  if(!q){
+    res.style.display='none';
+    res.innerHTML='';
+    setView(CURRENT_VIEW);
+    return;
+  }
   const re=globRe(q);
   let dirs='',files='',nd=0,nf=0;
   for(const root of ROOTS){
@@ -705,13 +949,15 @@ function doFilter(q){
       row+=`<span class="ic">${isDir?'&#x1F4C1;':'&#x1F4C4;'}</span>`;
       row+=`<div class="ri"><span class="rp">${esc(e.p)}</span><span class="rl">${esc(root.label)}</span></div>`;
       row+=`<span class="sz">${fmtB(e.b)}</span>`;
-      if(e.c)row+=`<span class="prv" onclick="showPrv('${esc(e.p)}')" title="Apri anteprima">&#x1F441;&#xFE0F;</span>`;
+      if(e.c)row+=`<span class="prv" onclick='showPrv(${jsq(e.p)})' title="Apri anteprima">&#x1F441;&#xFE0F;</span>`;
       row+='</div>';
       if(isDir){dirs+=row;nd++;}else{files+=row;nf++;}
     }
   }
   tree.style.display='none';
+  folders.style.display='none';
   res.style.display='';
+  updateBreadcrumbs();
   const tot=nd+nf;
   if(!tot){res.innerHTML='<div class="no-res">Nessun risultato per &ldquo;'+esc(q)+'&rdquo;</div>';return;}
   let out=`<div class="cnt">${tot} risultat${tot===1?'o':'i'} &mdash; ${nd} cartell${nd===1?'a':'e'}, ${nf} file</div>`;
@@ -752,19 +998,26 @@ function copyPrv(){
 document.addEventListener('DOMContentLoaded',function(){
   const c=document.getElementById('tree');
   let h='';
-  for(const root of ROOTS){
-    h+='<div class="src">';
-    h+=`<div class="src-hdr">${esc(root.label)}</div>`;
-    h+='<div class="tree">';
-    if(!root.entries||!root.entries.length){
-      h+='<div style="padding:12px 16px;color:#8b949e">Nessun dato disponibile</div>';
-    }else{
-      const t=buildTree(root.entries,root.root);
-      h+=t?rNode(t,t.bytes,0):'<div style="padding:12px;color:#f85149">Errore nella costruzione dell\'albero</div>';
+  const groups=[['Locale', rootsByType('local')], ['Remoto', rootsByType('remote')]];
+  for(const [title, roots] of groups){
+    if(!roots.length)continue;
+    h+=`<div class="sec">${sectionHeader(title, roots.length)}`;
+    for(const root of roots){
+      h+='<div class="src">';
+      h+=`<div class="src-hdr">${esc(root.type==='remote'?(root.host+' · '+root.label):root.label)}</div>`;
+      h+='<div class="tree">';
+      if(!root.entries||!root.entries.length){
+        h+='<div style="padding:12px 16px;color:#8b949e">Nessun dato disponibile</div>';
+      }else{
+        const t=buildTree(root.entries,root.root);
+        h+=t?rNode(t,t.bytes,0):"<div style=\"padding:12px;color:#f85149\">Errore nella costruzione dell'albero</div>";
+      }
+      h+='</div></div>';
     }
-    h+='</div></div>';
+    h+='</div>';
   }
   c.innerHTML=h;
+  renderFolderView();
   document.addEventListener('keydown',function(e){
     if(e.key==='Escape'){
       if(document.getElementById('prv-modal').style.display==='flex')closePrv();
@@ -1853,22 +2106,27 @@ while true; do
         1)
             start_operation_screen
             backup
+            finish_operation_notice "Backup completato."
             ;;
         2)
             start_operation_screen
             restore
+            finish_operation_notice "Restore completato."
             ;;
         3)
             start_operation_screen
             upload
+            finish_operation_notice "Upload completato."
             ;;
         4)
             start_operation_screen
             backup_e_upload
+            finish_operation_notice "Backup e upload completati."
             ;;
         5)
             start_operation_screen
             scompatta
+            finish_operation_notice "Scompattazione completata."
             ;;
         6)
             start_operation_screen

@@ -202,7 +202,7 @@ bash private_backup.sh
 
 - Nessun `rsync` sul remoto: il pull usa `ssh + tar`
 - Struttura percorsi preservata per file remoti e restore remoto
-- `BACKUP_REMOTE_DOCKER_HOSTS` cerca `.env` e `docker-compose*` via `find`
+- `BACKUP_REMOTE_DOCKER_HOSTS` cerca `.env`, `docker-compose*` e directory `.secrets` via `find`
 - `COMPOSE_WATCH_DIRS` avvisa sui file compose locali non inclusi in `BACKUP_ITEMS`
 - `tar --warning=no-file-ignored` evita errori sui socket GPG
 - `chmod -R u+rwX` rende gestibili i file remoti estratti con permessi restrittivi
@@ -412,7 +412,7 @@ bash private_backup.sh
 
 - No remote `rsync`: pull operations use `ssh + tar`
 - Remote path structure is preserved for both backup and restore
-- `BACKUP_REMOTE_DOCKER_HOSTS` discovers `.env` and `docker-compose*` files via `find`
+- `BACKUP_REMOTE_DOCKER_HOSTS` discovers `.env`, `docker-compose*`, and `.secrets` directories via `find`
 - `COMPOSE_WATCH_DIRS` warns about local compose files missing from `BACKUP_ITEMS`
 - `tar --warning=no-file-ignored` avoids GPG socket errors
 - `chmod -R u+rwX` makes extracted remote files manageable even with restrictive permissions
