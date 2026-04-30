@@ -58,6 +58,9 @@ cleanup_dialog_screen() {
 trap cleanup_dialog_screen EXIT
 
 start_operation_screen() {
+    if [ -t 1 ]; then
+        printf '\033[H\033[2J\033[3J' 2>/dev/null || true
+    fi
     clear
 }
 
@@ -101,6 +104,7 @@ dialog_menu() {
     if [ "${USE_DIALOG}" = true ]; then
         local tmp_output
         tmp_output="$(mktemp /tmp/private_dialog_XXXXXX)" || return 1
+        [ -t 1 ] && printf '\033[H\033[2J\033[3J' 2>/dev/null || true
         clear
         "${DIALOG_BIN}" --output-fd 3 --backtitle "PrivateBackup" --title "$title" \
             --menu "$text" "$height" "$width" "$menu_height" "$@" 3>"$tmp_output"
@@ -138,6 +142,7 @@ dialog_inputbox() {
     if [ "${USE_DIALOG}" = true ]; then
         local tmp_output
         tmp_output="$(mktemp /tmp/private_dialog_XXXXXX)" || return 1
+        [ -t 1 ] && printf '\033[H\033[2J\033[3J' 2>/dev/null || true
         clear
         "${DIALOG_BIN}" --output-fd 3 --backtitle "PrivateBackup" --title "$title" \
             --inputbox "$text" "$height" "$width" "$initial" 3>"$tmp_output"
@@ -161,6 +166,7 @@ dialog_passwordbox() {
     if [ "${USE_DIALOG}" = true ]; then
         local tmp_output
         tmp_output="$(mktemp /tmp/private_dialog_XXXXXX)" || return 1
+        [ -t 1 ] && printf '\033[H\033[2J\033[3J' 2>/dev/null || true
         clear
         "${DIALOG_BIN}" --output-fd 3 --insecure --backtitle "PrivateBackup" --title "$title" \
             --passwordbox "$text" "$height" "$width" 3>"$tmp_output"
@@ -195,6 +201,40 @@ _pause_if_needed() {
     local text="${1:-Premi invio per continuare.}"
     read -r -n 1 -s -p "$text" _
     echo ""
+}
+
+# Reset completo del terminale (incluso scrollback) per evitare residui ANSI
+# da comandi che usano cursor movement (es. rclone --progress).
+_terminal_reset() {
+    if [ -t 1 ]; then
+        printf '\033[H\033[2J\033[3J' 2>/dev/null || true
+        command -v tput &>/dev/null && tput cnorm 2>/dev/null || true
+        clear 2>/dev/null || true
+    fi
+}
+
+# Esegue rclone copyto mostrando la progress dentro un dialog --progressbox
+# quando il TUI è attivo. Altrimenti usa --progress in modalità classica.
+# Args: src dst [titolo_dialog]
+_rclone_copyto_progress() {
+    local src="$1" dst="$2" title="${3:-Upload in corso}"
+    local rc
+    if [ "${USE_DIALOG}" = true ]; then
+        clear
+        # --stats-one-line + --stats=1s producono righe di progress senza
+        # cursor escapes, perfette per --progressbox.
+        rclone copyto "$src" "$dst" \
+            --stats-one-line --stats=1s -v 2>&1 \
+          | tee -a "${LOG_FILE}" \
+          | "${DIALOG_BIN}" --backtitle "PrivateBackup" --title "$title" \
+            --progressbox "Upload: $(basename "$src")\nDestinazione: $dst" 22 110
+        rc=${PIPESTATUS[0]}
+        _terminal_reset
+    else
+        rclone copyto "$src" "$dst" --progress 2>>"${LOG_FILE}"
+        rc=$?
+    fi
+    return "$rc"
 }
 
 show_error() {
@@ -317,9 +357,6 @@ recupera_remoti() {
                     -o StrictHostKeyChecking=no)
     local skipped=0
 
-    # -n assicura che SSH non consumi lo stdin dello script (es. la password GPG)
-    chmod -R u+rwX "${REMOTE_STAGE_DIR}" 2>/dev/null
-    rm -rf "${REMOTE_STAGE_DIR}"
     echo "Recupero file da host remoti..."
     echo "$(date): Avvio recupero file remoti" >>"${LOG_FILE}"
 
@@ -348,13 +385,66 @@ recupera_remoti() {
     done
 
     if [ -d "${REMOTE_STAGE_DIR}" ] && [ "$(ls -A "${REMOTE_STAGE_DIR}" 2>/dev/null)" ]; then
-        # Garantisce che i file estratti da root remoto siano leggibili e cancellabili localmente
         chmod -R u+rwX "${REMOTE_STAGE_DIR}" 2>/dev/null
-        VALID_INCLUDE_PATHS+=("${REMOTE_STAGE_DIR}")
         echo "$(date): Recupero remoto completato" >>"${LOG_FILE}"
     fi
 
     [ "$skipped" -gt 0 ] && echo "❗ ${skipped} item non raggiungibili (saltati nel backup)."
+}
+
+# ============================================================
+# Funzione: recupera_remoti_docker
+# Scarica via SSH i file .env e docker-compose* da host remoti.
+# Individua i file tramite find: non servono percorsi specifici.
+# ============================================================
+recupera_remoti_docker() {
+    [[ -z "${BACKUP_REMOTE_DOCKER_HOSTS+x}" || ${#BACKUP_REMOTE_DOCKER_HOSTS[@]} -eq 0 ]] && return 0
+    local ssh_opts=(-n -o ConnectTimeout=5 -o IdentitiesOnly=yes \
+                    -i "${SSH_KEY:-${HOME}/.ssh/id_rsa}" \
+                    -o StrictHostKeyChecking=no)
+    local search_dirs="${BACKUP_REMOTE_DOCKER_SEARCH_DIRS:-/root /home /opt /srv /var/www}"
+    local skipped=0 tmp_tar ssh_status count
+
+    echo "Recupero .env e docker-compose da host remoti..."
+    echo "$(date): Avvio recupero Docker remoti" >>"${LOG_FILE}"
+
+    for userhost in "${BACKUP_REMOTE_DOCKER_HOSTS[@]}"; do
+        local hostname="${userhost##*@}"
+        local stagedir="${REMOTE_STAGE_DIR}/${hostname}"
+
+        mkdir -p "$stagedir"
+        echo "$userhost" > "${stagedir}/.userhost"
+        tmp_tar=$(mktemp /tmp/private_docker_XXXXXX.tar.gz)
+
+        # find sul remoto, xargs -r evita tar con lista vuota
+        ssh "${ssh_opts[@]}" "$userhost" \
+            "find ${search_dirs} -maxdepth 6 \
+             \( -name '.env' -o -name 'docker-compose.yml' -o -name 'docker-compose.yaml' \
+                -o -name 'compose.yml'    -o -name 'compose.yaml' \) 2>/dev/null \
+             | xargs -r tar -czf - --no-recursion 2>/dev/null" \
+            > "$tmp_tar" 2>>"${LOG_FILE}"
+        ssh_status=$?
+
+        if [ "$ssh_status" -ne 0 ]; then
+            echo "  ❗ Non raggiungibile: ${userhost}"
+            rm -f "$tmp_tar"
+            ((skipped++))
+            continue
+        fi
+
+        if [ -s "$tmp_tar" ]; then
+            tar -xzf "$tmp_tar" -C "${stagedir}/" >>"${LOG_FILE}" 2>&1
+            chmod -R u+rwX "${stagedir}" 2>/dev/null
+            count=$(find "$stagedir" -not -name '.userhost' -type f 2>/dev/null | wc -l)
+            echo "  ✅ ${userhost} (${count} file trovati)"
+        else
+            echo "  ℹ️  ${userhost}: nessun file Docker trovato"
+        fi
+        rm -f "$tmp_tar"
+    done
+
+    [ "$skipped" -gt 0 ] && echo "❗ ${skipped} host non raggiungibili (saltati nel backup)."
+    echo "$(date): Recupero Docker remoto completato" >>"${LOG_FILE}"
 }
 
 # ============================================================
@@ -493,14 +583,19 @@ body{background:#0d1117;color:#e6edf3;font-family:'Courier New',Consolas,monospa
 .fb button{background:#21262d;border:1px solid #30363d;border-radius:6px;color:#8b949e;padding:8px 13px;cursor:pointer;font-size:.9em;transition:all .1s}
 .fb button:hover{background:#30363d;color:#e6edf3}
 .cnt{color:#8b949e;font-size:.82em;padding:6px 2px 10px}
+.grp-h{color:#79c0ff;font-size:.82em;font-weight:bold;padding:10px 12px 4px;letter-spacing:.03em;border-top:1px solid #21262d;margin-top:4px}
+.grp-h:first-of-type{border-top:none;margin-top:0}
 .rr{display:flex;align-items:center;padding:5px 12px;gap:8px;border-radius:4px;cursor:default}
 .rr:hover{background:#21262d}
 .ri{flex:1;overflow:hidden;min-width:0}
 .rp{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:.88em}
 .rl{color:#8b949e;font-size:.76em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .no-res{padding:20px;color:#8b949e;text-align:center;font-size:.9em}
-.prv{flex-shrink:0;cursor:pointer;font-size:.85em;padding:1px 6px;border-radius:4px;color:#484f58;transition:color .1s;user-select:none}
-.prv:hover{color:#79c0ff}
+.prv{flex-shrink:0;cursor:pointer;font-size:1em;padding:4px 10px;border-radius:5px;color:#79c0ff;background:#1f2937;border:1px solid #30363d;transition:all .12s;user-select:none;display:inline-flex;align-items:center;gap:5px;font-family:inherit}
+.prv::after{content:"Anteprima";font-size:.78em;color:#8b949e;letter-spacing:.02em}
+.prv:hover{color:#fff;background:#1f6feb;border-color:#388bfd}
+.prv:hover::after{color:#fff}
+.prv:active{transform:scale(.96)}
 .mw{display:none;position:fixed;inset:0;background:rgba(0,0,0,.78);z-index:100;align-items:center;justify-content:center}
 .mb{background:#161b22;border:1px solid #30363d;border-radius:10px;width:92%;max-width:960px;max-height:88vh;display:flex;flex-direction:column;box-shadow:0 24px 48px rgba(0,0,0,.5)}
 .mh{display:flex;align-items:center;gap:10px;padding:12px 16px;border-bottom:1px solid #30363d;min-width:0}
@@ -600,23 +695,29 @@ function doFilter(q){
   q=q.trim();
   if(!q){tree.style.display='';res.style.display='none';res.innerHTML='';return;}
   const re=globRe(q);
-  let h='',n=0;
+  let dirs='',files='',nd=0,nf=0;
   for(const root of ROOTS){
     for(const e of root.entries){
-      const nm=e.p.split('/').pop();
-      if(!nm||!re.test(nm))continue;
-      n++;
-      h+=`<div class="rr" title="${esc(e.p)}">`;
-      h+=`<span class="ic">${e.d?'&#x1F4C1;':'&#x1F4C4;'}</span>`;
-      h+=`<div class="ri"><span class="rp">${esc(e.p)}</span><span class="rl">${esc(root.label)}</span></div>`;
-      h+=`<span class="sz">${fmtB(e.b)}</span>`;
-      if(e.c)h+=`<span class="prv" onclick="showPrv('${esc(e.p)}')" title="Anteprima">&#x1F441;&#xFE0F;</span>`;
-      h+='</div>';
+      const nm=e.p.split('/').filter(Boolean).pop()||'';
+      if(!re.test(nm)&&!re.test(e.p))continue;
+      const isDir=e.d===1;
+      let row=`<div class="rr" title="${esc(e.p)}">`;
+      row+=`<span class="ic">${isDir?'&#x1F4C1;':'&#x1F4C4;'}</span>`;
+      row+=`<div class="ri"><span class="rp">${esc(e.p)}</span><span class="rl">${esc(root.label)}</span></div>`;
+      row+=`<span class="sz">${fmtB(e.b)}</span>`;
+      if(e.c)row+=`<span class="prv" onclick="showPrv('${esc(e.p)}')" title="Apri anteprima">&#x1F441;&#xFE0F;</span>`;
+      row+='</div>';
+      if(isDir){dirs+=row;nd++;}else{files+=row;nf++;}
     }
   }
   tree.style.display='none';
   res.style.display='';
-  res.innerHTML=n?`<div class="cnt">${n} risultat${n===1?'o':'i'}</div>`+h:'<div class="no-res">Nessun risultato per &ldquo;'+esc(q)+'&rdquo;</div>';
+  const tot=nd+nf;
+  if(!tot){res.innerHTML='<div class="no-res">Nessun risultato per &ldquo;'+esc(q)+'&rdquo;</div>';return;}
+  let out=`<div class="cnt">${tot} risultat${tot===1?'o':'i'} &mdash; ${nd} cartell${nd===1?'a':'e'}, ${nf} file</div>`;
+  if(nd)out+=`<div class="grp-h">&#x1F4C1; Cartelle (${nd})</div>`+dirs;
+  if(nf)out+=`<div class="grp-h">&#x1F4C4; File (${nf})</div>`+files;
+  res.innerHTML=out;
 }
 function clearFilter(){
   const fi=document.getElementById('flt');
@@ -679,7 +780,7 @@ HTMLEOF
 
     echo "📊 Snapshot HTML: ${snapshot_file}"
     if [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ] && command -v xdg-open &>/dev/null; then
-        xdg-open "$snapshot_file" 2>/dev/null &
+        (setsid xdg-open "$snapshot_file" </dev/null >/dev/null 2>&1 &) >/dev/null 2>&1
     fi
 }
 
@@ -867,8 +968,14 @@ backup() {
         done < <(find "$basedir" -type d -name "$dirname" 2>/dev/null)
     done
 
-    # Recupera file da host remoti (aggiunge staging a VALID_INCLUDE_PATHS)
+    # Pulizia staging dir remota (condivisa tra recupera_remoti e recupera_remoti_docker)
+    chmod -R u+rwX "${REMOTE_STAGE_DIR}" 2>/dev/null
+    rm -rf "${REMOTE_STAGE_DIR}"
     recupera_remoti
+    recupera_remoti_docker
+    if [ -d "${REMOTE_STAGE_DIR}" ] && [ "$(ls -A "${REMOTE_STAGE_DIR}" 2>/dev/null)" ]; then
+        VALID_INCLUDE_PATHS+=("${REMOTE_STAGE_DIR}")
+    fi
 
     if [ ${#VALID_INCLUDE_PATHS[@]} -eq 0 ]; then
         echo "❌ Nessun percorso valido trovato per il backup!"
@@ -1570,9 +1677,7 @@ upload() {
     echo "(il file remoto verrà sovrascritto se già esistente)"
     echo "$(date): Avvio upload di ${BACKUP_FILE_TO_UPLOAD} -> ${REMOTE_ARCHIVE}" >>"${LOG_FILE}"
 
-    rclone copyto "${BACKUP_FILE_TO_UPLOAD}" "${REMOTE_ARCHIVE}" --progress 2>>"${LOG_FILE}"
-
-    if [ $? -ne 0 ]; then
+    if ! _rclone_copyto_progress "${BACKUP_FILE_TO_UPLOAD}" "${REMOTE_ARCHIVE}" "Upload archivio"; then
         echo "❌ Errore durante l'upload del backup!"
         echo "$(date): Errore upload ${BACKUP_FILE_TO_UPLOAD}" >>"${LOG_FILE}"
         exit 1
@@ -1580,8 +1685,8 @@ upload() {
 
     # Upload del file checksum con nome fisso
     if [ -f "${CHECKSUM_TO_UPLOAD}" ]; then
-        rclone copyto "${CHECKSUM_TO_UPLOAD}" "${REMOTE_CHECKSUM}" --progress 2>>"${LOG_FILE}"
-        [ $? -eq 0 ] && echo "✅ Checksum caricato: $(basename "${REMOTE_CHECKSUM}")"
+        _rclone_copyto_progress "${CHECKSUM_TO_UPLOAD}" "${REMOTE_CHECKSUM}" "Upload checksum" \
+            && echo "✅ Checksum caricato: $(basename "${REMOTE_CHECKSUM}")"
     fi
 
     echo "✅ Upload completato con successo!"
@@ -1653,6 +1758,25 @@ esplora_backup() {
 }
 
 # ============================================================
+# Funzione: modifica_config
+# Apre il file di configurazione nell'editor di testo
+# ============================================================
+modifica_config() {
+    local editor="${EDITOR:-}"
+    if [ -z "$editor" ]; then
+        for e in nano vi; do
+            command -v "$e" &>/dev/null && editor="$e" && break
+        done
+    fi
+    if [ -z "$editor" ]; then
+        show_error "❌ Nessun editor trovato. Imposta la variabile \$EDITOR."
+        return 1
+    fi
+    "$editor" "${CONFIG_FILE}"
+    dialog_msgbox "Configurazione salvata.\n\nRiavvia lo script per applicare le modifiche." 10 70
+}
+
+# ============================================================
 # Funzione: backup_e_upload
 # ============================================================
 backup_e_upload() {
@@ -1667,16 +1791,14 @@ backup_e_upload() {
         exit 1
     fi
 
-    rclone copyto "${BACKUP_FILE}" "${REMOTE_ARCHIVE}" --progress 2>>"${LOG_FILE}"
-
-    if [ $? -ne 0 ]; then
+    if ! _rclone_copyto_progress "${BACKUP_FILE}" "${REMOTE_ARCHIVE}" "Upload archivio"; then
         echo "❌ Errore durante l'upload del backup!"
         echo "$(date): Errore upload ${BACKUP_FILE}" >>"${LOG_FILE}"
         exit 1
     fi
 
     if [ -f "${CHECKSUM_FILE}" ]; then
-        rclone copyto "${CHECKSUM_FILE}" "${REMOTE_CHECKSUM}" --progress 2>>"${LOG_FILE}"
+        _rclone_copyto_progress "${CHECKSUM_FILE}" "${REMOTE_CHECKSUM}" "Upload checksum"
     fi
 
     echo "✅ Backup e upload completati con successo!"
@@ -1689,7 +1811,7 @@ backup_e_upload() {
 while true; do
     if [ "${USE_DIALOG}" = true ]; then
         dialog_menu "PrivateBackup" "Configurazione: ${CONFIG_FILE}\nDestinazione: ${BACKUP_DEST_DIR}\nRemote rclone: ${RCLONE_REMOTE_PATH}" \
-            20 110 10 \
+            20 110 11 \
             1 "Backup" \
             2 "Restore" \
             3 "Upload su Google Drive (rclone)" \
@@ -1697,6 +1819,7 @@ while true; do
             5 "Scompatta archivio" \
             6 "Visualizza snapshot dimensioni cartelle" \
             7 "Esplora backup" \
+            8 "Modifica configurazione" \
             0 "Esci"
         if [ $? -eq 0 ]; then
             CHOICE="$DIALOG_RESULT"
@@ -1720,9 +1843,10 @@ while true; do
         echo "5) Scompatta archivio"
         echo "6) Visualizza snapshot dimensioni cartelle"
         echo "7) Esplora backup"
+        echo "8) Modifica configurazione"
         echo "0) Esci"
         echo ""
-        read -r -p "Inserisci la tua scelta (0-7): " CHOICE
+        read -r -p "Inserisci la tua scelta (0-8): " CHOICE
     fi
 
     case "$CHOICE" in
@@ -1751,7 +1875,7 @@ while true; do
             _snapshot_file="${BACKUP_DEST_DIR}/folder_snapshot.html"
             if [ -f "$_snapshot_file" ]; then
                 if [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ] && command -v xdg-open &>/dev/null; then
-                    xdg-open "$_snapshot_file" 2>/dev/null &
+                    (setsid xdg-open "$_snapshot_file" </dev/null >/dev/null 2>&1 &) >/dev/null 2>&1
                     dialog_msgbox "Snapshot aperto nel browser.\n\n${_snapshot_file}" 10 90
                 else
                     dialog_msgbox "Snapshot disponibile in:\n\n${_snapshot_file}\n\nAprilo con un browser web." 12 90
@@ -1763,6 +1887,10 @@ while true; do
         7)
             start_operation_screen
             esplora_backup
+            ;;
+        8)
+            start_operation_screen
+            modifica_config
             ;;
         0)
             echo "Uscita."
