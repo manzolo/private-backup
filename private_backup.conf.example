@@ -2,7 +2,7 @@
 # private_backup.conf — Configurazione di private_backup.sh
 #
 # Copia questo file in:
-#   ~/.config/privatebackup/private_backup.conf
+#   ~/.config/manzolo/private_backup.conf
 # e adattalo al tuo ambiente.
 # ============================================================
 

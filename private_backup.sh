@@ -3,11 +3,11 @@
 # ============================================================
 # private_backup.sh - Backup, restore e upload su Google Drive
 # di file e cartelle private dell'utente
-# Configurazione: ~/.config/privatebackup/private_backup.conf
+# Configurazione: ~/.config/manzolo/private_backup.conf
 # ============================================================
 
 # Caricamento configurazione
-CONFIG_FILE="${HOME}/.config/privatebackup/private_backup.conf"
+CONFIG_FILE="${HOME}/.config/manzolo/private_backup.conf"
 DIALOG_BIN="$(command -v dialog 2>/dev/null || true)"
 
 if [ ! -f "${CONFIG_FILE}" ]; then

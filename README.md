@@ -21,11 +21,11 @@ cd private-backup
 chmod +x private_backup.sh
 
 # Crea la directory di configurazione e copia l'esempio
-mkdir -p ~/.config/privatebackup
-cp private_backup.conf.example ~/.config/privatebackup/private_backup.conf
+mkdir -p ~/.config/manzolo
+cp private_backup.conf.example ~/.config/manzolo/private_backup.conf
 
 # Modifica il config con i tuoi percorsi e host
-$EDITOR ~/.config/privatebackup/private_backup.conf
+$EDITOR ~/.config/manzolo/private_backup.conf
 ```
 
 ## Dipendenze
@@ -64,7 +64,7 @@ Menu principale:
 
 ## Configurazione
 
-Il file di configurazione si trova in `~/.config/privatebackup/private_backup.conf`. Vedi [`private_backup.conf.example`](private_backup.conf.example) per un template commentato.
+Il file di configurazione si trova in `~/.config/manzolo/private_backup.conf`. Vedi [`private_backup.conf.example`](private_backup.conf.example) per un template commentato.
 
 ### File e cartelle locali
 
