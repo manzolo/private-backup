@@ -1,47 +1,45 @@
 # PrivateBackup
 
+[Italiano](#italiano) | [English](#english)
+
+---
+
+## Italiano
+
 Script Bash per il backup di file e cartelle private, con supporto a:
 
 - backup remoti via **SSH + tar** (nessun `rsync` richiesto sul remoto)
 - **cifratura GPG AES256** con password chiesta a runtime
-- **restore selettivo** (file singoli, cartelle, host remoti specifici)
-- **upload su Google Drive** tramite rclone
-- interfaccia TUI con `dialog` (fallback testuale automatico)
+- **restore selettivo** di file, cartelle e host remoti
+- **upload su Google Drive** tramite `rclone`
+- interfaccia TUI con `dialog` e fallback testuale automatico
 
----
-
-## Installazione
+### Installazione
 
 ```bash
-# Clona il repository
-git clone https://github.com/<tuo-utente>/private-backup.git
+git clone https://github.com/manzolo/private-backup.git
 cd private-backup
 
-# Rendi lo script eseguibile
 chmod +x private_backup.sh
 
-# Crea la directory di configurazione e copia l'esempio
 mkdir -p ~/.config/manzolo
 cp private_backup.conf.example ~/.config/manzolo/private_backup.conf
 
-# Modifica il config con i tuoi percorsi e host
 $EDITOR ~/.config/manzolo/private_backup.conf
 ```
 
-## Dipendenze
+### Dipendenze
 
 | Tool | Uso | Obbligatorio |
 |------|-----|:---:|
-| `tar` | creazione e estrazione archivi | ✅ |
-| `sha256sum` | verifica integrità | ✅ |
+| `tar` | creazione ed estrazione archivi | `yes` |
+| `sha256sum` | verifica integrita | `yes` |
 | `ssh` | accesso agli host remoti | solo con remoti |
 | `gpg` | cifratura/decifratura AES256 | solo se `BACKUP_ENCRYPT=true` |
-| `rclone` | upload su Google Drive | solo per upload |
-| `dialog` | interfaccia TUI | no (fallback testuale) |
+| `rclone` | upload cloud | solo per upload |
+| `dialog` | TUI | no |
 
----
-
-## Avvio
+### Avvio
 
 ```bash
 bash private_backup.sh
@@ -49,7 +47,7 @@ bash private_backup.sh
 
 Menu principale:
 
-```
+```text
 1) Backup
 2) Restore
 3) Upload su Google Drive (rclone)
@@ -60,13 +58,11 @@ Menu principale:
 0) Esci
 ```
 
----
+### Configurazione
 
-## Configurazione
+Il file di configurazione si trova in `~/.config/manzolo/private_backup.conf`. Vedi [`private_backup.conf.example`](private_backup.conf.example).
 
-Il file di configurazione si trova in `~/.config/manzolo/private_backup.conf`. Vedi [`private_backup.conf.example`](private_backup.conf.example) per un template commentato.
-
-### File e cartelle locali
+File e cartelle locali:
 
 ```bash
 BACKUP_ITEMS=(
@@ -77,19 +73,15 @@ BACKUP_ITEMS=(
 )
 ```
 
-### Ricerca automatica di sottocartelle
-
-Trova ricorsivamente tutte le sottocartelle con un dato nome sotto una directory base. Utile per includere automaticamente nuove cartelle senza modificare il config.
+Ricerca automatica di sottocartelle:
 
 ```bash
 BACKUP_FIND_DIRS=(
-    "${HOME}/projects:.env"   # include tutte le dir ".env" dentro ~/projects
+    "${HOME}/projects:.env"
 )
 ```
 
-### Backup da host remoti via SSH
-
-Non richiede `rsync` sul remoto — basta che siano disponibili `ssh` e `tar`.
+Backup remoti via SSH:
 
 ```bash
 SSH_KEY="${HOME}/.ssh/id_rsa"
@@ -98,138 +90,334 @@ BACKUP_REMOTE_ITEMS=(
     "root@server1.lan:/root/.env"
     "root@server1.lan:/root/myapp"
     "user@server2.lan:/etc/myconfig"
-    # Formato: "user@host:/percorso/assoluto"
-    # Funziona sia con file singoli che con directory intere
 )
 ```
 
-I file remoti vengono scaricati in una staging dir locale (`.remote_stage/`) e inclusi nell'archivio finale con la struttura originale dei percorsi preservata.
+I file remoti vengono scaricati in `.remote_stage/` e inclusi nell'archivio mantenendo la struttura dei percorsi.
 
-### Cifratura GPG
+Recupero automatico file Docker remoti:
 
 ```bash
-BACKUP_ENCRYPT=true   # false per disabilitare
+BACKUP_REMOTE_DOCKER_HOSTS=(
+    "root@server1.lan"
+    "root@server2.lan"
+)
+
+BACKUP_REMOTE_DOCKER_SEARCH_DIRS="/root /home /opt /srv /var/www"
 ```
 
-Quando abilitata, la password viene chiesta a runtime (due volte per conferma) e **non viene mai salvata su disco**. L'archivio prodotto ha estensione `.tar.gz.gpg`.
+Controllo compose locali non tracciati:
 
-### Destinazione e remote rclone
+```bash
+COMPOSE_WATCH_DIRS=(
+    "${HOME}/projects"
+    "${HOME}/docker"
+)
+```
+
+Cifratura:
+
+```bash
+BACKUP_ENCRYPT=true
+```
+
+Destinazione e remote `rclone`:
 
 ```bash
 BACKUP_DEST_DIR="${HOME}/backups/private"
 RCLONE_REMOTE_PATH="gdrive:Backup/private"
 ```
 
----
+### Funzionalita
 
-## Funzionalità
+`1. Backup`
 
-### 1 — Backup
-
-1. Scarica i file da tutti gli host in `BACKUP_REMOTE_ITEMS` via `ssh + tar`
+1. Scarica i file da `BACKUP_REMOTE_ITEMS` via `ssh + tar`
 2. Aggiunge le directory trovate tramite `BACKUP_FIND_DIRS`
-3. Crea un archivio compresso con timestamp:
-   ```
-   ~/backups/private/<hostname>_private_<timestamp>.tar.gz.gpg
-   ~/backups/private/<hostname>_private_<timestamp>.tar.gz.gpg.sha256
-   ```
-4. Cifra con GPG AES256 se `BACKUP_ENCRYPT=true`
-5. Calcola e salva il checksum SHA256
-6. Elimina automaticamente gli archivi locali oltre i 7 più recenti
+3. Crea un archivio con timestamp
+4. Cifra con GPG se `BACKUP_ENCRYPT=true`
+5. Genera checksum SHA256
+6. Mantiene solo gli ultimi 7 archivi locali
 
-Percorsi inesistenti vengono saltati silenziosamente (con avviso a fine backup).
+I percorsi inesistenti vengono saltati con avviso finale.
 
-### 2 — Restore
+`2. Restore`
 
-#### Restore completo o selettivo
+- Navigazione gerarchica con `dialog`
+- Selezione manuale nel fallback testuale
+- Ripristino in posizione originale oppure in `~/backups/private/restore/`
+- Ripristino remoto via `tar | ssh` sugli host originali
 
-Con `dialog` puoi navigare il contenuto dell'archivio in modo gerarchico:
+`3. Upload su Google Drive`
 
-- `Apri` — entra nella cartella o mostra l'anteprima di un file
-- `Segna` — aggiunge o rimuove file/cartelle dalla selezione
-- `Fine` — conferma la selezione per il restore
+Mantiene sempre lo stesso nome file sul remote:
 
-Nel fallback testuale è disponibile l'elenco numerato classico con selezione manuale (es. `3`, `1,4,7`, `2-5`, `1-3,7`).
-
-#### Destinazione restore locale
-
-| Opzione | Destinazione | Note |
-|---------|-------------|------|
-| Posizione originale | `/` | Richiede conferma. Usa `sudo` se necessario |
-| Cartella anteprima | `~/backups/private/restore/` | Sicura, per ispezionare prima di sovrascrivere |
-
-#### Restore remoto
-
-Se l'archivio contiene file scaricati da host remoti, viene proposto il ripristino sugli host originali. È possibile scegliere un singolo host o tutti.
-
-```
-Host disponibili per il ripristino:
-   1) server1.lan                    (12 file)
-   2) server2.lan                    (47 file)
-   a) Tutti gli host
-   0) Annulla
-```
-
-Il ripristino avviene tramite `tar | ssh`, senza richiedere rsync sul remoto.
-
-### 3 — Upload su Google Drive
-
-Carica l'archivio scelto su Google Drive tramite rclone. Sul remote viene mantenuto **sempre lo stesso file** (il precedente viene sovrascritto):
-
-```
+```text
 gdrive:Backup/private/<hostname>_private.tar.gz.gpg
 gdrive:Backup/private/<hostname>_private.tar.gz.gpg.sha256
 ```
 
-Verifica dei file presenti sul remote:
+Verifica:
+
 ```bash
 rclone ls gdrive:Backup/private
 ```
 
-### 4 — Backup + Upload
+`4. Backup + Upload`
 
-Esegue backup locale e upload in sequenza con un solo comando.
+Esegue backup locale e upload in sequenza.
 
-### 5 — Scompatta archivio
+`5. Scompatta archivio`
 
-Decifra (se necessario) ed estrae un archivio scelto in una sottocartella dedicata dentro `~/backups/private/`. Utile per ispezionare il contenuto o estrarre file specifici manualmente.
+Estrae un archivio scelto in una sottocartella dedicata dentro `~/backups/private/`.
 
-### 7 — Esplora backup
+`6. Snapshot cartelle`
 
-Apre un archivio in sola lettura e permette di navigarlo con `dialog`:
+Genera `~/backups/private/folder_snapshot.html` con:
 
-- vista ad albero con navigazione su/giù nelle cartelle
-- anteprima diretta dei file testuali
-- riepilogo tipo/dimensione per file binari
+- albero locale/remoto
+- dimensioni aggregate
+- ricerca per nome o percorso completo
+- risultati separati tra cartelle e file
+- anteprima dei file testuali piccoli
 
----
+Se c'e un display grafico disponibile, il file viene aperto automaticamente nel browser.
 
-## Restore da Google Drive
+`7. Esplora backup`
+
+Permette di navigare un archivio in sola lettura con anteprima file testuali e riepilogo dei file binari.
+
+### Restore da Google Drive
 
 ```bash
-# Scarica l'archivio
 rclone copy gdrive:Backup/private/<hostname>_private.tar.gz.gpg ~/backups/private/
 rclone copy gdrive:Backup/private/<hostname>_private.tar.gz.gpg.sha256 ~/backups/private/
 
-# Verifica integrità
 sha256sum -c ~/backups/private/<hostname>_private.tar.gz.gpg.sha256
 
-# Avvia lo script e scegli Restore (opzione 2)
 bash private_backup.sh
 ```
 
+### Note tecniche
+
+- Nessun `rsync` sul remoto: il pull usa `ssh + tar`
+- Struttura percorsi preservata per file remoti e restore remoto
+- `BACKUP_REMOTE_DOCKER_HOSTS` cerca `.env` e `docker-compose*` via `find`
+- `COMPOSE_WATCH_DIRS` avvisa sui file compose locali non inclusi in `BACKUP_ITEMS`
+- `tar --warning=no-file-ignored` evita errori sui socket GPG
+- `chmod -R u+rwX` rende gestibili i file remoti estratti con permessi restrittivi
+- la password GPG passa via file descriptor con `--pinentry-mode loopback`
+
+### Licenza
+
+MIT
+
 ---
 
-## Note tecniche
+## English
 
-- **Nessun rsync sul remoto**: il pull usa `ssh + tar` (pipeline `ssh host "tar -czf - -C / path"` → `tar -xzf -`), quindi basta che sul remoto siano presenti `ssh` e `tar`
-- **Struttura percorsi preservata**: un file `/root/.env` da `server1.lan` finisce in `.remote_stage/server1.lan/root/.env` e viene ripristinato in `/root/.env` sull'host originale
-- **Socket GPG ignorati**: `tar --warning=no-file-ignored` evita errori su file socket (`S.gpg-agent.*`) presenti nelle directory GPG
-- **Permessi file remoti**: dopo il pull viene eseguito `chmod -R u+rwX` sulla staging dir per rendere leggibili e cancellabili file estratti con permessi restrittivi di root
-- **Password con caratteri speciali**: la password viene passata a GPG tramite file descriptor (`--passphrase-fd 3`) con `--pinentry-mode loopback`, gestendo correttamente caratteri come `!`, `?`, `$`, ecc.
+Bash script for backing up private files and folders, with support for:
 
----
+- remote backups via **SSH + tar** with no `rsync` required on the remote host
+- **AES256 GPG encryption** with password prompt at runtime
+- **selective restore** of files, folders, and remote hosts
+- **Google Drive upload** through `rclone`
+- `dialog`-based TUI with automatic plain-text fallback
 
-## Licenza
+### Installation
+
+```bash
+git clone https://github.com/manzolo/private-backup.git
+cd private-backup
+
+chmod +x private_backup.sh
+
+mkdir -p ~/.config/manzolo
+cp private_backup.conf.example ~/.config/manzolo/private_backup.conf
+
+$EDITOR ~/.config/manzolo/private_backup.conf
+```
+
+### Dependencies
+
+| Tool | Purpose | Required |
+|------|---------|:---:|
+| `tar` | create and extract archives | `yes` |
+| `sha256sum` | integrity verification | `yes` |
+| `ssh` | access remote hosts | only for remote backups |
+| `gpg` | AES256 encryption/decryption | only if `BACKUP_ENCRYPT=true` |
+| `rclone` | cloud upload | only for uploads |
+| `dialog` | TUI interface | no |
+
+### Run
+
+```bash
+bash private_backup.sh
+```
+
+Main menu:
+
+```text
+1) Backup
+2) Restore
+3) Upload su Google Drive (rclone)
+4) Backup + Upload
+5) Scompatta archivio
+6) Visualizza snapshot dimensioni cartelle
+7) Esplora backup
+0) Esci
+```
+
+### Configuration
+
+The config file is located at `~/.config/manzolo/private_backup.conf`. See [`private_backup.conf.example`](private_backup.conf.example).
+
+Local files and folders:
+
+```bash
+BACKUP_ITEMS=(
+    "${HOME}/.ssh"
+    "${HOME}/.gnupg"
+    "${HOME}/.config/myapp"
+    "${HOME}/.bashrc"
+)
+```
+
+Automatic subfolder discovery:
+
+```bash
+BACKUP_FIND_DIRS=(
+    "${HOME}/projects:.env"
+)
+```
+
+Remote backups over SSH:
+
+```bash
+SSH_KEY="${HOME}/.ssh/id_rsa"
+
+BACKUP_REMOTE_ITEMS=(
+    "root@server1.lan:/root/.env"
+    "root@server1.lan:/root/myapp"
+    "user@server2.lan:/etc/myconfig"
+)
+```
+
+Remote files are downloaded into `.remote_stage/` and packed while preserving their original path layout.
+
+Automatic remote Docker file discovery:
+
+```bash
+BACKUP_REMOTE_DOCKER_HOSTS=(
+    "root@server1.lan"
+    "root@server2.lan"
+)
+
+BACKUP_REMOTE_DOCKER_SEARCH_DIRS="/root /home /opt /srv /var/www"
+```
+
+Warn about untracked local compose files:
+
+```bash
+COMPOSE_WATCH_DIRS=(
+    "${HOME}/projects"
+    "${HOME}/docker"
+)
+```
+
+Encryption:
+
+```bash
+BACKUP_ENCRYPT=true
+```
+
+Destination and `rclone` remote:
+
+```bash
+BACKUP_DEST_DIR="${HOME}/backups/private"
+RCLONE_REMOTE_PATH="gdrive:Backup/private"
+```
+
+### Features
+
+`1. Backup`
+
+1. Pulls files from `BACKUP_REMOTE_ITEMS` via `ssh + tar`
+2. Adds directories discovered through `BACKUP_FIND_DIRS`
+3. Creates a timestamped archive
+4. Encrypts it with GPG if `BACKUP_ENCRYPT=true`
+5. Generates a SHA256 checksum
+6. Keeps only the latest 7 local archives
+
+Missing paths are skipped and reported at the end.
+
+`2. Restore`
+
+- Hierarchical archive browsing with `dialog`
+- Manual selection in text fallback mode
+- Restore to original location or to `~/backups/private/restore/`
+- Remote restore back to the original hosts via `tar | ssh`
+
+`3. Google Drive Upload`
+
+The remote always keeps a stable filename:
+
+```text
+gdrive:Backup/private/<hostname>_private.tar.gz.gpg
+gdrive:Backup/private/<hostname>_private.tar.gz.gpg.sha256
+```
+
+Check remote files:
+
+```bash
+rclone ls gdrive:Backup/private
+```
+
+`4. Backup + Upload`
+
+Runs a local backup and uploads it immediately after.
+
+`5. Extract Archive`
+
+Decrypts if needed and extracts the selected archive into a dedicated folder inside `~/backups/private/`.
+
+`6. Folder Snapshot`
+
+Generates `~/backups/private/folder_snapshot.html` with:
+
+- local and remote tree view
+- aggregated sizes
+- search by filename or full path
+- separate folder/file result groups
+- preview for small text files
+
+If a graphical display is available, the HTML file is opened automatically in the browser.
+
+`7. Browse Backup`
+
+Opens an archive in read-only mode and lets you inspect text files or view a size/type summary for binary files.
+
+### Restore from Google Drive
+
+```bash
+rclone copy gdrive:Backup/private/<hostname>_private.tar.gz.gpg ~/backups/private/
+rclone copy gdrive:Backup/private/<hostname>_private.tar.gz.gpg.sha256 ~/backups/private/
+
+sha256sum -c ~/backups/private/<hostname>_private.tar.gz.gpg.sha256
+
+bash private_backup.sh
+```
+
+### Technical notes
+
+- No remote `rsync`: pull operations use `ssh + tar`
+- Remote path structure is preserved for both backup and restore
+- `BACKUP_REMOTE_DOCKER_HOSTS` discovers `.env` and `docker-compose*` files via `find`
+- `COMPOSE_WATCH_DIRS` warns about local compose files missing from `BACKUP_ITEMS`
+- `tar --warning=no-file-ignored` avoids GPG socket errors
+- `chmod -R u+rwX` makes extracted remote files manageable even with restrictive permissions
+- the GPG password is passed through a file descriptor with `--pinentry-mode loopback`
+
+### License
 
 MIT
