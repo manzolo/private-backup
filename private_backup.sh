@@ -489,6 +489,16 @@ _read_text_content() {
     base64 -w0 "$fpath" 2>/dev/null
 }
 
+_preview_priority_file() {
+    local fpath="${1,,}"
+    case "$fpath" in
+        *.md|*.txt|*.yml|*.yaml|*.json|*.toml|*.ini|*.cfg|*.conf|*.sh|*.py|*.js|*.ts|*.env|*/.env|*.env.*)
+            return 0
+            ;;
+    esac
+    return 1
+}
+
 # ============================================================
 # Funzione: snapshot_cartelle
 # Genera folder_snapshot.html: albero interattivo (stile Baobab)
@@ -523,11 +533,13 @@ snapshot_cartelle() {
             fp_esc="$(_json_escape "$fpath")"
             is_dir=0; [ -d "$fpath" ] && is_dir=1
             _cf=""
-            if [ "$is_dir" -eq 0 ] && [ "${bytes:-0}" -le "$preview_limit_bytes" ] && { [ "${bytes:-0}" -le "$preview_always_bytes" ] || [ "$preview_count" -lt "$preview_count_limit" ]; }; then
+            if [ "$is_dir" -eq 0 ] && [ "${bytes:-0}" -le "$preview_limit_bytes" ] && { [ "${bytes:-0}" -le "$preview_always_bytes" ] || _preview_priority_file "$fpath" || [ "$preview_count" -lt "$preview_count_limit" ]; }; then
                 _ct="$(_read_text_content "$fpath" "$bytes")"
                 if [ -n "$_ct" ]; then
                     _cf=",\"c\":\"${_ct}\""
-                    [ "${bytes:-0}" -gt "$preview_always_bytes" ] && ((preview_count++))
+                    if [ "${bytes:-0}" -gt "$preview_always_bytes" ] && ! _preview_priority_file "$fpath"; then
+                        ((preview_count++))
+                    fi
                 fi
             fi
             entries+="{\"b\":${bytes},\"p\":\"${fp_esc}\",\"d\":${is_dir}${_cf}},"
@@ -557,11 +569,13 @@ snapshot_cartelle() {
                     fp_esc="$(_json_escape "$fpath")"
                     is_dir=0; [ -d "$fpath" ] && is_dir=1
                     _cf=""
-                    if [ "$is_dir" -eq 0 ] && [ "${bytes:-0}" -le "$preview_limit_bytes" ] && { [ "${bytes:-0}" -le "$preview_always_bytes" ] || [ "$preview_count" -lt "$preview_count_limit" ]; }; then
+                    if [ "$is_dir" -eq 0 ] && [ "${bytes:-0}" -le "$preview_limit_bytes" ] && { [ "${bytes:-0}" -le "$preview_always_bytes" ] || _preview_priority_file "$fpath" || [ "$preview_count" -lt "$preview_count_limit" ]; }; then
                         _ct="$(_read_text_content "$fpath" "$bytes")"
                         if [ -n "$_ct" ]; then
                             _cf=",\"c\":\"${_ct}\""
-                            [ "${bytes:-0}" -gt "$preview_always_bytes" ] && ((preview_count++))
+                            if [ "${bytes:-0}" -gt "$preview_always_bytes" ] && ! _preview_priority_file "$fpath"; then
+                                ((preview_count++))
+                            fi
                         fi
                     fi
                     entries+="{\"b\":${bytes},\"p\":\"${fp_esc}\",\"d\":${is_dir}${_cf}},"
@@ -668,7 +682,7 @@ body{background:#0d1117;color:#e6edf3;font-family:'Courier New',Consolas,monospa
 .mbtn{border-radius:6px;padding:5px 12px;cursor:pointer;font-size:.82em;white-space:nowrap;font-family:inherit}
 #prv-copy{background:#238636;border:1px solid #2ea043;color:#fff}
 #prv-close{background:#21262d;border:1px solid #30363d;color:#8b949e}
-#prv-pre{flex:1;overflow:auto;padding:16px;font-size:.83em;line-height:1.55;color:#e6edf3;white-space:pre-wrap;word-break:break-all;margin:0;font-family:'Courier New',Consolas,monospace}
+#prv-pre{flex:1;overflow:auto;padding:16px;font-size:.83em;line-height:1.55;color:#e6edf3;white-space:pre-wrap;word-break:break-word;overflow-wrap:anywhere;margin:0;font-family:'Courier New',Consolas,monospace}
 </style>
 </head>
 <body>
@@ -875,13 +889,21 @@ function folderCard(item){
   return h;
 }
 function rootCard(root,idx){
-  const bytes=(root.entries||[]).find(e=>e.p===root.root)?.b||0;
-  return `<div class="card dir" ondblclick="openRoot(${idx})" title="${esc(root.root)}">
-    <div class="card-h"><span class="card-ic">${root.type==='remote'?'&#x1F310;':'&#x1F5C2;&#xFE0F;'}</span><div class="card-ti">${esc(root.label)}</div></div>
-    <div class="card-path">${esc(root.root)}</div>
-    <div class="card-meta"><span>${root.type==='remote'?(root.host||'Remoto'):'Locale'}</span><span>${fmtB(bytes)}</span></div>
-    <div class="card-act"><button class="card-open" onclick="event.stopPropagation();openRoot(${idx})">Apri</button></div>
-  </div>`;
+  const rootEntry=(root.entries||[]).find(e=>e.p===root.root) || null;
+  const bytes=rootEntry?.b||0;
+  const isDir=!rootEntry || rootEntry.d===1;
+  const hasContent=!!(rootEntry && rootEntry.c);
+  const dbl=isDir?` ondblclick="openRoot(${idx})"`:(hasContent?` ondblclick='showPrv(${jsq(root.root)})'`:'');
+  let h=`<div class="card ${isDir?'dir':'file'}"${dbl} title="${esc(root.root)}">`;
+  h+=`<div class="card-h"><span class="card-ic">${isDir?(root.type==='remote'?'&#x1F310;':'&#x1F5C2;&#xFE0F;'):'&#x1F4C4;'}</span><div class="card-ti">${esc(root.label)}</div></div>`;
+  h+=`<div class="card-path">${esc(root.root)}</div>`;
+  h+=`<div class="card-meta"><span>${root.type==='remote'?(root.host||'Remoto'):'Locale'}</span><span>${fmtB(bytes)}</span></div>`;
+  h+='<div class="card-act">';
+  if(isDir)h+=`<button class="card-open" onclick="event.stopPropagation();openRoot(${idx})">Apri</button>`;
+  else if(hasContent)h+=`<span class="prv" onclick='event.stopPropagation();showPrv(${jsq(root.root)})' title="Apri anteprima">&#x1F441;&#xFE0F;</span>`;
+  else h+='<span class="card-note">Anteprima non disponibile</span>';
+  h+='</div></div>';
+  return h;
 }
 function renderFolderView(){
   const el=document.getElementById('folders');
@@ -923,6 +945,54 @@ function renderFolderView(){
   }
   el.innerHTML=out;
 }
+function renderFolderFilter(q){
+  const el=document.getElementById('folders');
+  const re=globRe(q);
+  updateBreadcrumbs();
+  if(CURRENT_ROOT<0){
+    const roots=ROOTS.map((root,idx)=>({
+      idx,
+      root,
+      name: root.label,
+      path: root.root,
+      bytes: (root.entries||[]).find(e=>e.p===root.root)?.b || 0
+    })).filter(item=>re.test(item.name)||re.test(item.path)||(item.root.host&&re.test(item.root.host)));
+    if(!roots.length){
+      el.innerHTML='<div class="empty">Nessun risultato nella vista cartelle.</div>';
+      return;
+    }
+    let out=`<div class="flsec"><div class="flttl">Origini filtrate (${roots.length})</div><div class="fd">`;
+    for(const item of roots)out+=rootCard(item.root,item.idx);
+    out+='</div></div>';
+    el.innerHTML=out;
+    return;
+  }
+  const root=getCurrentRoot();
+  if(!root){
+    el.innerHTML='<div class="empty">Radice non disponibile.</div>';
+    return;
+  }
+  const items=collectFolderItems(root,CURRENT_PATH).filter(item=>re.test(item.name)||re.test(item.path));
+  const dirs=items.filter(i=>i.isDir);
+  const files=items.filter(i=>!i.isDir);
+  let out='';
+  out+=`<div class="flsec"><div class="flttl">Cartella corrente filtrata</div><div class="card"><div class="card-h"><span class="card-ic">&#x1F50D;</span><div class="card-ti">${esc(CURRENT_PATH)}</div></div><div class="card-path">${esc(root.type==='remote'?(root.host+' · Remoto'):'Locale')}</div><div class="card-act"><button class="card-open" onclick="goUp()">Su di un livello</button></div></div></div>`;
+  if(!items.length){
+    el.innerHTML=out+'<div class="empty">Nessun risultato in questa cartella.</div>';
+    return;
+  }
+  if(dirs.length){
+    out+=`<div class="flsec"><div class="flttl">&#x1F4C1; Cartelle (${dirs.length})</div><div class="fd">`;
+    for(const item of dirs)out+=folderCard(item);
+    out+='</div></div>';
+  }
+  if(files.length){
+    out+=`<div class="flsec"><div class="flttl">&#x1F4C4; File (${files.length})</div><div class="flgrid">`;
+    for(const item of files)out+=folderCard(item);
+    out+='</div></div>';
+  }
+  el.innerHTML=out;
+}
 function globRe(q){
   const s=q.replace(/[.+^${}()|[\]\\]/g,'\\$&').replace(/\*/g,'.*').replace(/\?/g,'.');
   return new RegExp(s,'i');
@@ -936,6 +1006,14 @@ function doFilter(q){
     res.style.display='none';
     res.innerHTML='';
     setView(CURRENT_VIEW);
+    return;
+  }
+  if(CURRENT_VIEW==='folder'){
+    tree.style.display='none';
+    folders.style.display='';
+    res.style.display='none';
+    res.innerHTML='';
+    renderFolderFilter(q);
     return;
   }
   const re=globRe(q);
