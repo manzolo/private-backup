@@ -20,10 +20,6 @@ source "${CONFIG_FILE}"
 
 # Variabili derivate dalla configurazione
 HOSTNAME_SHORT="$(hostname)"
-TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
-BACKUP_FILE="${BACKUP_DEST_DIR}/${HOSTNAME_SHORT}_private_${TIMESTAMP}.tar.gz"
-CHECKSUM_FILE="${BACKUP_FILE}.sha256"
-SNAPSHOT_FILE="${BACKUP_DEST_DIR}/${HOSTNAME_SHORT}_private_${TIMESTAMP}_folder_snapshot.html"
 LATEST_SNAPSHOT_FILE="${BACKUP_DEST_DIR}/folder_snapshot.html"
 LOG_FILE="${BACKUP_DEST_DIR}/private_backup.log"
 RESTORE_PREVIEW_DIR="${BACKUP_DEST_DIR}/restore"
@@ -37,6 +33,15 @@ else
     REMOTE_ARCHIVE="${RCLONE_REMOTE_PATH}/${HOSTNAME_SHORT}_private.tar.gz"
     REMOTE_CHECKSUM="${RCLONE_REMOTE_PATH}/${HOSTNAME_SHORT}_private.tar.gz.sha256"
 fi
+
+reset_backup_runtime_vars() {
+    TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
+    BACKUP_FILE="${BACKUP_DEST_DIR}/${HOSTNAME_SHORT}_private_${TIMESTAMP}.tar.gz"
+    CHECKSUM_FILE="${BACKUP_FILE}.sha256"
+    SNAPSHOT_FILE="${BACKUP_DEST_DIR}/${HOSTNAME_SHORT}_private_${TIMESTAMP}_folder_snapshot.html"
+}
+
+reset_backup_runtime_vars
 
 # Creazione della directory di backup e del log, se non esistono
 mkdir -p "${BACKUP_DEST_DIR}"
@@ -1310,6 +1315,8 @@ controlla_compose_non_tracciati() {
 # Funzione: backup
 # ============================================================
 backup() {
+    reset_backup_runtime_vars
+
     # Validazione percorsi da BACKUP_ITEMS
     VALID_INCLUDE_PATHS=()
     MISSING_PATHS=()
@@ -1447,20 +1454,17 @@ backup() {
 # ============================================================
 lista_backup() {
     mapfile -t BACKUP_FILES < <(
-        ls -1t "${BACKUP_DEST_DIR}"/*_private_*.tar.gz \
-               "${BACKUP_DEST_DIR}"/*_private_*.tar.gz.gpg 2>/dev/null | \
-        grep -v '\.sha256$'
+        find "${BACKUP_DEST_DIR}" -maxdepth 1 -type f \
+            \( -name '*_private_*.tar.gz' -o -name '*_private_*.tar.gz.gpg' -o -name '*_private_*.tar.gz.gpg.gpg' \) \
+            ! -name '*.sha256' \
+            ! -name '*_folder_snapshot.html' \
+            -printf '%T@ %p\n' 2>/dev/null | sort -n -r | cut -d' ' -f2-
     )
 
     if [ ${#BACKUP_FILES[@]} -eq 0 ]; then
         BACKUP_FILES=()
         return 1
     fi
-
-    # Ordina per data di modifica, dal più recente
-    mapfile -t BACKUP_FILES < <(for f in "${BACKUP_FILES[@]}"; do
-        echo "$(stat --format='%Y' "$f") $f"
-    done | sort -n -r | cut -d' ' -f2-)
 
     for i in "${!BACKUP_FILES[@]}"; do
         backup_file="${BACKUP_FILES[$i]}"
