@@ -253,7 +253,9 @@ gpg_decrypt_to_stdout() {
     local archive="$1"
     local tmp_home
 
-    dialog_infobox "Verifica archivio in corso...\n\n$(basename "$archive")" 8 70
+    # UI redirected to /dev/tty: this function runs inside a pipeline,
+    # so anything on stdout would corrupt the decrypted stream.
+    dialog_infobox "Verifica archivio in corso...\n\n$(basename "$archive")" 8 70 >/dev/tty 2>/dev/tty
     tmp_home="$(_gpg_tmp_home)" || return 1
     GNUPGHOME="$tmp_home" gpg --no-options --homedir "$tmp_home" \
         --decrypt --batch --pinentry-mode loopback --yes \
@@ -262,7 +264,7 @@ gpg_decrypt_to_stdout() {
         3< <(printf '%s' "$BACKUP_PASSWORD")
     local status=$?
     rm -rf "$tmp_home"
-    close_dialog_overlay
+    close_dialog_overlay >/dev/tty 2>/dev/tty
     return $status
 }
 
@@ -371,109 +373,314 @@ _fmt_bytes() {
 }
 
 # ============================================================
+# Helper: escape minimo per valori stringa JSON
+# ============================================================
+_json_escape() {
+    printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\t/\\t/g; s/\r//g'
+}
+
+# Legge e codifica in base64 un file testo <= 32KB; stampa nulla se binario o troppo grande
+_read_text_content() {
+    local fpath="$1" bytes="$2"
+    [ -f "$fpath" ] && [ "${bytes:-0}" -le 32768 ] && [ "${bytes:-0}" -gt 0 ] || return
+    [ "$(file -b --mime-encoding "$fpath" 2>/dev/null)" = "binary" ] && return
+    base64 -w0 "$fpath" 2>/dev/null
+}
+
+# ============================================================
 # Funzione: snapshot_cartelle
-# Scrive folder_snapshot.txt con le dimensioni di tutti i
-# percorsi inclusi nel backup, dal più grande al più piccolo.
+# Genera folder_snapshot.html: albero interattivo (stile Baobab)
+# con le dimensioni di tutti i percorsi inclusi nel backup.
 # Sovrascritta ad ogni backup.
 # ============================================================
 snapshot_cartelle() {
-    local snapshot_file="${BACKUP_DEST_DIR}/folder_snapshot.txt"
-    local -a rows=() summary_rows=() detail_rows=()
-    local total_bytes=0 local_total=0 bytes path item rel host_dir hostname userhost host_total
+    local snapshot_file="${BACKUP_DEST_DIR}/folder_snapshot.html"
+    local date_str archive_name total_bytes total_bytes_fmt
+    local roots_json="" entries path_esc label_esc root_bytes is_dir bytes fpath fp_esc
+    local path host_dir hostname userhost item rel
 
-    # Percorsi locali (esclude la staging remota)
+    date_str=$(date '+%d/%m/%Y %H:%M:%S')
+    archive_name=$(basename "${BACKUP_FILE}")
+    total_bytes=0
+
+    # --- Percorsi locali ---
     for path in "${VALID_INCLUDE_PATHS[@]}"; do
         [[ "$path" == "${REMOTE_STAGE_DIR}"* ]] && continue
         [ -e "$path" ] || continue
-        bytes=$(du -sb "$path" 2>/dev/null | cut -f1)
-        bytes="${bytes:-0}"
-        rows+=("${bytes}"$'\t'"[locale]  ${path}")
-        (( total_bytes += bytes )) || true
-        (( local_total += bytes )) || true
+        entries=""
+        root_bytes=0
+        while IFS=$'\t' read -r bytes fpath; do
+            [ -n "$fpath" ] || continue
+            bytes="${bytes:-0}"
+            fp_esc="$(_json_escape "$fpath")"
+            is_dir=0; [ -d "$fpath" ] && is_dir=1
+            _cf=""; [ "$is_dir" -eq 0 ] && { _ct="$(_read_text_content "$fpath" "$bytes")"; [ -n "$_ct" ] && _cf=",\"c\":\"${_ct}\""; }
+            entries+="{\"b\":${bytes},\"p\":\"${fp_esc}\",\"d\":${is_dir}${_cf}},"
+            [ "$fpath" = "$path" ] && root_bytes="$bytes"
+        done < <(du -ab --max-depth=5 "$path" 2>/dev/null | head -n 8000)
+        entries="${entries%,}"
+        label_esc="$(_json_escape "[locale] $path")"
+        path_esc="$(_json_escape "$path")"
+        roots_json+="{\"label\":\"${label_esc}\",\"root\":\"${path_esc}\",\"entries\":[${entries}]},"
+        (( total_bytes += root_bytes )) || true
     done
-    [ "$local_total" -gt 0 ] && summary_rows+=("${local_total}"$'\t'"[locale]")
 
-    # Percorsi remoti: riepilogo per host e dettaglio immediato dei percorsi più grossi
+    # --- Percorsi remoti ---
     if [ -d "${REMOTE_STAGE_DIR}" ]; then
         while IFS= read -r host_dir; do
             hostname=$(basename "$host_dir")
             userhost=$(cat "${host_dir}/.userhost" 2>/dev/null || echo "?@${hostname}")
-            host_total=0
-
             while IFS= read -r item; do
                 [ -e "$item" ] || continue
-                bytes=$(du -sb "$item" 2>/dev/null | cut -f1)
-                bytes="${bytes:-0}"
                 rel="/${item#${host_dir}/}"
-                rows+=("${bytes}"$'\t'"[${userhost}]  ${rel}")
-                (( total_bytes += bytes )) || true
-                (( host_total += bytes )) || true
-
-                if [ -d "$item" ]; then
-                    while IFS= read -r child; do
-                        [ -e "$child" ] || continue
-                        local child_bytes child_rel
-                        child_bytes=$(du -sb "$child" 2>/dev/null | cut -f1)
-                        child_bytes="${child_bytes:-0}"
-                        child_rel="/${child#${host_dir}/}"
-                        detail_rows+=("${userhost}"$'\t'"${child_bytes}"$'\t'"${rel}"$'\t'"${child_rel}")
-                    done < <(find "$item" -mindepth 1 -maxdepth 1 2>/dev/null | sort)
-                fi
+                entries=""
+                root_bytes=0
+                while IFS=$'\t' read -r bytes fpath; do
+                    [ -n "$fpath" ] || continue
+                    bytes="${bytes:-0}"
+                    fp_esc="$(_json_escape "$fpath")"
+                    is_dir=0; [ -d "$fpath" ] && is_dir=1
+                    _cf=""; [ "$is_dir" -eq 0 ] && { _ct="$(_read_text_content "$fpath" "$bytes")"; [ -n "$_ct" ] && _cf=",\"c\":\"${_ct}\""; }
+                    entries+="{\"b\":${bytes},\"p\":\"${fp_esc}\",\"d\":${is_dir}${_cf}},"
+                    [ "$fpath" = "$item" ] && root_bytes="$bytes"
+                done < <(du -ab --max-depth=5 "$item" 2>/dev/null | head -n 8000)
+                entries="${entries%,}"
+                label_esc="$(_json_escape "[${userhost}] ${rel}")"
+                path_esc="$(_json_escape "$item")"
+                roots_json+="{\"label\":\"${label_esc}\",\"root\":\"${path_esc}\",\"entries\":[${entries}]},"
+                (( total_bytes += root_bytes )) || true
             done < <(find "$host_dir" -mindepth 1 -maxdepth 1 -not -name '.userhost' 2>/dev/null | sort)
-
-            [ "$host_total" -gt 0 ] && summary_rows+=("${host_total}"$'\t'"[${userhost}]")
         done < <(find "${REMOTE_STAGE_DIR}" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort)
     fi
 
+    roots_json="[${roots_json%,}]"
+    total_bytes_fmt="$(_fmt_bytes "$total_bytes")"
+
     {
-        printf "# Snapshot dimensioni cartelle\n"
-        printf "# Data:     %s\n" "$(date '+%d/%m/%Y %H:%M:%S')"
-        printf "# Archivio: %s\n" "$(basename "${BACKUP_FILE}")"
-        printf "#\n"
-
-        printf "RIEPILOGO SORGENTI\n"
-        printf "%-12s  %s\n" "Dimensione" "Sorgente"
-        printf "%-12s  %s\n" "------------" "--------------------------------------------"
-        if [ ${#summary_rows[@]} -gt 0 ]; then
-            printf '%s\n' "${summary_rows[@]}" | sort -t$'\t' -k1 -rn | \
-            while IFS=$'\t' read -r sum_bytes label; do
-                printf "%-12s  %s\n" "$(_fmt_bytes "$sum_bytes")" "$label"
-            done
-        else
-            printf "(nessun dato)\n"
-        fi
-
-        printf "\nTOP VOCI GLOBALI\n"
-        printf "%-12s  %s\n" "Dimensione" "Percorso"
-        printf "%-12s  %s\n" "------------" "--------------------------------------------"
-        if [ ${#rows[@]} -gt 0 ]; then
-            printf '%s\n' "${rows[@]}" | sort -t$'\t' -k1 -rn | head -n 20 | \
-            while IFS=$'\t' read -r row_bytes label; do
-                printf "%-12s  %s\n" "$(_fmt_bytes "$row_bytes")" "$label"
-            done
-        else
-            printf "(nessun dato)\n"
-        fi
-
-        if [ ${#detail_rows[@]} -gt 0 ]; then
-            local host
-            while IFS= read -r host; do
-                printf "\nDETTAGLIO %s\n" "$host"
-                printf "%-12s  %s\n" "Dimensione" "Percorso"
-                printf "%-12s  %s\n" "------------" "--------------------------------------------"
-                printf '%s\n' "${detail_rows[@]}" | awk -F'\t' -v host="$host" '$1 == host {print $2 "\t" $4}' | \
-                    sort -t$'\t' -k1 -rn | head -n 12 | \
-                    while IFS=$'\t' read -r det_bytes det_label; do
-                        printf "%-12s  %s\n" "$(_fmt_bytes "$det_bytes")" "$det_label"
-                    done
-            done < <(printf '%s\n' "${detail_rows[@]}" | cut -f1 | sort -u)
-        fi
-
-        printf "\n%-12s  %s\n" "------------" "--------------------------------------------"
-        printf "%-12s  %s\n" "$(_fmt_bytes "$total_bytes")" "TOTALE (non compresso)"
+        cat << 'HTMLEOF'
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Folder Snapshot &mdash; PrivateBackup</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#0d1117;color:#e6edf3;font-family:'Courier New',Consolas,monospace;font-size:14px;padding:24px;min-height:100vh}
+.hdr{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:20px 24px;margin-bottom:20px}
+.hdr h1{color:#58a6ff;font-size:1.15em;margin-bottom:10px;letter-spacing:.02em}
+.hdr .m{color:#8b949e;font-size:.9em;margin-top:4px}
+.hdr .tot{color:#3fb950;font-weight:bold;margin-top:10px;font-size:1em}
+.src{background:#161b22;border:1px solid #30363d;border-radius:10px;margin-bottom:14px;overflow:hidden}
+.src-hdr{background:#21262d;padding:10px 16px;font-weight:bold;color:#79c0ff;border-bottom:1px solid #30363d;font-size:.88em;letter-spacing:.03em}
+.tree{padding:4px 0}
+.nr{display:flex;align-items:center;padding:2px 0;gap:6px;cursor:default;user-select:none;border-radius:3px;transition:background .1s}
+.nr:hover{background:#21262d}
+.nr.hk{cursor:pointer}
+.tg{width:14px;color:#6e7681;font-size:.65em;flex-shrink:0;text-align:center}
+.ic{flex-shrink:0;font-size:.9em}
+.bw{width:140px;height:7px;background:#21262d;border-radius:4px;flex-shrink:0;overflow:hidden}
+.b{height:100%;border-radius:4px;min-width:2px}
+.sz{min-width:76px;text-align:right;color:#8b949e;font-size:.8em;flex-shrink:0}
+.nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;font-size:.9em}
+.nm.f{color:#6e7681}
+.ch{overflow:hidden}
+.l0{padding-left:10px}.l1{padding-left:24px}.l2{padding-left:38px}.l3{padding-left:52px}.l4{padding-left:66px}.l5{padding-left:80px}.l6{padding-left:94px}
+.fb{display:flex;gap:8px;align-items:center;margin-bottom:16px}
+.fb input{flex:1;background:#161b22;border:1px solid #30363d;border-radius:6px;padding:8px 14px;color:#e6edf3;font-family:inherit;font-size:.9em;outline:none}
+.fb input:focus{border-color:#58a6ff;box-shadow:0 0 0 2px rgba(88,166,255,.15)}
+.fb input::placeholder{color:#484f58}
+.fb button{background:#21262d;border:1px solid #30363d;border-radius:6px;color:#8b949e;padding:8px 13px;cursor:pointer;font-size:.9em;transition:all .1s}
+.fb button:hover{background:#30363d;color:#e6edf3}
+.cnt{color:#8b949e;font-size:.82em;padding:6px 2px 10px}
+.rr{display:flex;align-items:center;padding:5px 12px;gap:8px;border-radius:4px;cursor:default}
+.rr:hover{background:#21262d}
+.ri{flex:1;overflow:hidden;min-width:0}
+.rp{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:.88em}
+.rl{color:#8b949e;font-size:.76em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.no-res{padding:20px;color:#8b949e;text-align:center;font-size:.9em}
+.prv{flex-shrink:0;cursor:pointer;font-size:.85em;padding:1px 6px;border-radius:4px;color:#484f58;transition:color .1s;user-select:none}
+.prv:hover{color:#79c0ff}
+.mw{display:none;position:fixed;inset:0;background:rgba(0,0,0,.78);z-index:100;align-items:center;justify-content:center}
+.mb{background:#161b22;border:1px solid #30363d;border-radius:10px;width:92%;max-width:960px;max-height:88vh;display:flex;flex-direction:column;box-shadow:0 24px 48px rgba(0,0,0,.5)}
+.mh{display:flex;align-items:center;gap:10px;padding:12px 16px;border-bottom:1px solid #30363d;min-width:0}
+.mp{color:#79c0ff;font-size:.82em;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mbtn{border-radius:6px;padding:5px 12px;cursor:pointer;font-size:.82em;white-space:nowrap;font-family:inherit}
+#prv-copy{background:#238636;border:1px solid #2ea043;color:#fff}
+#prv-close{background:#21262d;border:1px solid #30363d;color:#8b949e}
+#prv-pre{flex:1;overflow:auto;padding:16px;font-size:.83em;line-height:1.55;color:#e6edf3;white-space:pre-wrap;word-break:break-all;margin:0;font-family:'Courier New',Consolas,monospace}
+</style>
+</head>
+<body>
+<div class="hdr">
+  <h1>&#x1F5C4;&#xFE0F; PrivateBackup &mdash; Snapshot Cartelle</h1>
+HTMLEOF
+        printf '  <div class="m">&#x1F4C5; Data: %s</div>\n' "$date_str"
+        printf '  <div class="m">&#x1F4E6; Archivio: %s</div>\n' "$archive_name"
+        printf '  <div class="tot">&#x1F4BE; Totale stimato (non compresso): %s</div>\n' "$total_bytes_fmt"
+        cat << 'HTMLEOF'
+</div>
+<div class="fb">
+  <input id="flt" type="text" placeholder="Filtra per nome: .env   *.log   id_rsa   authorized_keys ..." oninput="doFilter(this.value)">
+  <button onclick="clearFilter()" title="Cancella filtro">&#x2715;</button>
+</div>
+<div id="tree"></div>
+<div id="res" style="display:none"></div>
+<div id="prv-modal" class="mw" onclick="if(event.target===this)closePrv()">
+  <div class="mb">
+    <div class="mh">
+      <span class="mp" id="prv-path"></span>
+      <button id="prv-copy" class="mbtn" onclick="copyPrv()">Copia tutto</button>
+      <button id="prv-close" class="mbtn" onclick="closePrv()">&#x2715;</button>
+    </div>
+    <pre id="prv-pre"></pre>
+  </div>
+</div>
+<script>
+HTMLEOF
+        printf 'const ROOTS=%s;\n' "$roots_json"
+        cat << 'HTMLEOF'
+let _i=0;
+function fmtB(b){b=+b;if(b>=1073741824)return(b/1073741824).toFixed(1)+' GiB';if(b>=1048576)return(b/1048576).toFixed(1)+' MiB';if(b>=1024)return(b/1024).toFixed(1)+' KiB';return b+' B';}
+function col(b){if(b>=1073741824)return'#f85149';if(b>=104857600)return'#f0883e';if(b>=10485760)return'#d29922';return'#3fb950';}
+function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
+function buildTree(entries,root){
+  const m={};
+  for(const e of entries){
+    const nm=e.p===root?(e.p.split('/').filter(Boolean).pop()||e.p):e.p.split('/').pop();
+    m[e.p]={name:nm||e.p,path:e.p,bytes:+e.b,isDir:e.d===1,children:[],hasContent:!!e.c};
+  }
+  for(const e of entries){
+    if(e.p===root)continue;
+    const pp=e.p.replace(/\/+$/,'').split('/').slice(0,-1).join('/');
+    if(m[pp])m[pp].children.push(m[e.p]);
+  }
+  for(const k of Object.keys(m))m[k].children.sort((a,b)=>b.bytes-a.bytes);
+  return m[root]||null;
+}
+function rNode(n,pb,d){
+  if(!n)return'';
+  const pct=pb>0?n.bytes/pb*100:100;
+  const bw=Math.max(2,Math.min(100,pct)).toFixed(1);
+  const hk=n.children.length>0;
+  const isD=n.isDir||hk;
+  const coll=hk;
+  const id='n'+(++_i);
+  let h='<div>';
+  h+=`<div class="nr l${Math.min(d,6)}${hk?' hk':''}"${hk?` onclick="tg('${id}')" `:''}title="${esc(n.path)}">`;
+  h+=`<span class="tg" id="t${id}">${hk?(coll?'&#9654;':'&#9660;'):''}</span>`;
+  h+=`<span class="ic">${isD?'&#x1F4C1;':'&#x1F4C4;'}</span>`;
+  h+=`<div class="bw"><div class="b" style="width:${bw}%;background:${col(n.bytes)}"></div></div>`;
+  h+=`<span class="sz">${fmtB(n.bytes)}</span>`;
+  h+=`<span class="nm${isD?'':' f'}">${esc(n.name)}</span>`;
+  if(n.hasContent)h+=`<span class="prv" onclick="event.stopPropagation();showPrv('${esc(n.path)}')" title="Anteprima">&#x1F441;&#xFE0F;</span>`;
+  h+='</div>';
+  if(hk){
+    h+=`<div id="${id}" class="ch"${coll?' style="display:none"':''}>`;
+    for(const c of n.children)h+=rNode(c,n.bytes,d+1);
+    h+='</div>';
+  }
+  h+='</div>';
+  return h;
+}
+function tg(id){
+  const el=document.getElementById(id),ti=document.getElementById('t'+id);
+  if(!el)return;
+  const hidden=el.style.display==='none';
+  el.style.display=hidden?'':'none';
+  if(ti)ti.innerHTML=hidden?'&#9660;':'&#9654;';
+}
+function globRe(q){
+  const s=q.replace(/[.+^${}()|[\]\\]/g,'\\$&').replace(/\*/g,'.*').replace(/\?/g,'.');
+  return new RegExp(s,'i');
+}
+function doFilter(q){
+  const tree=document.getElementById('tree');
+  const res=document.getElementById('res');
+  q=q.trim();
+  if(!q){tree.style.display='';res.style.display='none';res.innerHTML='';return;}
+  const re=globRe(q);
+  let h='',n=0;
+  for(const root of ROOTS){
+    for(const e of root.entries){
+      const nm=e.p.split('/').pop();
+      if(!nm||!re.test(nm))continue;
+      n++;
+      h+=`<div class="rr" title="${esc(e.p)}">`;
+      h+=`<span class="ic">${e.d?'&#x1F4C1;':'&#x1F4C4;'}</span>`;
+      h+=`<div class="ri"><span class="rp">${esc(e.p)}</span><span class="rl">${esc(root.label)}</span></div>`;
+      h+=`<span class="sz">${fmtB(e.b)}</span>`;
+      if(e.c)h+=`<span class="prv" onclick="showPrv('${esc(e.p)}')" title="Anteprima">&#x1F441;&#xFE0F;</span>`;
+      h+='</div>';
+    }
+  }
+  tree.style.display='none';
+  res.style.display='';
+  res.innerHTML=n?`<div class="cnt">${n} risultat${n===1?'o':'i'}</div>`+h:'<div class="no-res">Nessun risultato per &ldquo;'+esc(q)+'&rdquo;</div>';
+}
+function clearFilter(){
+  const fi=document.getElementById('flt');
+  fi.value='';
+  doFilter('');
+  fi.focus();
+}
+function showPrv(path){
+  let b64=null;
+  for(const r of ROOTS){const e=r.entries.find(e=>e.p===path&&e.c);if(e){b64=e.c;break;}}
+  if(!b64)return;
+  let txt;
+  try{
+    const raw=atob(b64),u8=new Uint8Array(raw.length);
+    for(let i=0;i<raw.length;i++)u8[i]=raw.charCodeAt(i);
+    txt=new TextDecoder('utf-8',{fatal:false}).decode(u8);
+  }catch(e){txt='(errore decodifica)';}
+  document.getElementById('prv-path').textContent=path;
+  document.getElementById('prv-pre').textContent=txt;
+  document.getElementById('prv-copy').textContent='Copia tutto';
+  document.getElementById('prv-modal').style.display='flex';
+}
+function closePrv(){document.getElementById('prv-modal').style.display='none';}
+function copyPrv(){
+  const txt=document.getElementById('prv-pre').textContent;
+  navigator.clipboard.writeText(txt).then(()=>{
+    const b=document.getElementById('prv-copy');
+    b.textContent='&#x2713; Copiato!';
+    setTimeout(()=>b.textContent='Copia tutto',2200);
+  }).catch(()=>{try{document.execCommand('copy');}catch(e){}});
+}
+document.addEventListener('DOMContentLoaded',function(){
+  const c=document.getElementById('tree');
+  let h='';
+  for(const root of ROOTS){
+    h+='<div class="src">';
+    h+=`<div class="src-hdr">${esc(root.label)}</div>`;
+    h+='<div class="tree">';
+    if(!root.entries||!root.entries.length){
+      h+='<div style="padding:12px 16px;color:#8b949e">Nessun dato disponibile</div>';
+    }else{
+      const t=buildTree(root.entries,root.root);
+      h+=t?rNode(t,t.bytes,0):'<div style="padding:12px;color:#f85149">Errore nella costruzione dell\'albero</div>';
+    }
+    h+='</div></div>';
+  }
+  c.innerHTML=h;
+  document.addEventListener('keydown',function(e){
+    if(e.key==='Escape'){
+      if(document.getElementById('prv-modal').style.display==='flex')closePrv();
+      else clearFilter();
+    }
+  });
+});
+</script>
+</body>
+</html>
+HTMLEOF
     } > "$snapshot_file"
 
-    echo "📊 Snapshot dimensioni: $(basename "$snapshot_file")"
+    echo "📊 Snapshot HTML: ${snapshot_file}"
+    if [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ] && command -v xdg-open &>/dev/null; then
+        xdg-open "$snapshot_file" 2>/dev/null &
+    fi
 }
 
 # ============================================================
@@ -596,6 +803,38 @@ ripristina_remoto() {
 }
 
 # ============================================================
+# Funzione: controlla_compose_non_tracciati
+# Avvisa se esistono docker-compose non presenti in BACKUP_ITEMS
+# ============================================================
+controlla_compose_non_tracciati() {
+    [[ -z "${COMPOSE_WATCH_DIRS+x}" || ${#COMPOSE_WATCH_DIRS[@]} -eq 0 ]] && return 0
+    local untracked=() found tracked item
+
+    for watchdir in "${COMPOSE_WATCH_DIRS[@]}"; do
+        while IFS= read -r found; do
+            tracked=false
+            for item in "${BACKUP_ITEMS[@]}"; do
+                [[ "$item" == "$found" ]] && tracked=true && break
+            done
+            $tracked || untracked+=("$found")
+        done < <(find "$watchdir" -maxdepth 2 -type f \
+            \( -name "docker-compose.yml" -o -name "docker-compose.yaml" \
+               -o -name "compose.yml"         -o -name "compose.yaml" \) \
+            2>/dev/null | sort)
+    done
+
+    if [ ${#untracked[@]} -gt 0 ]; then
+        local YLW='\033[1;33m' RED='\033[1;31m' CYN='\033[0;36m' RST='\033[0m'
+        echo ""
+        echo -e "${RED}❗ docker-compose non tracciati nel backup:${RST}"
+        for f in "${untracked[@]}"; do
+            echo -e "   ${YLW}-${RST} ${CYN}${f}${RST}"
+        done
+        echo -e "   Aggiungili a ${YLW}BACKUP_ITEMS${RST} in ${CONFIG_FILE}"
+    fi
+}
+
+# ============================================================
 # Funzione: backup
 # ============================================================
 backup() {
@@ -676,14 +915,21 @@ backup() {
     # Verifica che l'archivio sia decifrabile con la password inserita
     if [[ "${BACKUP_ENCRYPT:-false}" == "true" ]]; then
         echo "Verifica cifratura con la password inserita..."
-        local test_entry
-        test_entry=$(gpg_decrypt_to_stdout "${BACKUP_FILE}" | tar -tzf - 2>/dev/null | head -1)
-        if [ -n "$test_entry" ]; then
+        # Usiamo PIPESTATUS per leggere l'exit reale di gpg e tar,
+        # senza far dipendere il check da output testuale di tar.
+        # NB: 'local' è un comando e azzera PIPESTATUS, quindi va dichiarato prima.
+        local gpg_status tar_status pipe_statuses
+        gpg_decrypt_to_stdout "${BACKUP_FILE}" | tar -tzf - >/dev/null 2>>"${LOG_FILE}"
+        pipe_statuses=("${PIPESTATUS[@]}")
+        gpg_status=${pipe_statuses[0]}
+        tar_status=${pipe_statuses[1]}
+        if [ "$gpg_status" -eq 0 ] && [ "$tar_status" -eq 0 ]; then
             echo "✅ Verifica cifratura OK: archivio apribile con la password inserita"
         else
             echo "⚠️  Verifica cifratura fallita: archivio non decifrabile con la password inserita!"
-            echo "   L'archivio esiste ma la password potrebbe essere errata."
-            echo "$(date): ATTENZIONE - verifica cifratura fallita per ${BACKUP_FILE}" >>"${LOG_FILE}"
+            echo "   gpg exit=${gpg_status}, tar exit=${tar_status}"
+            echo "   Controlla ${LOG_FILE} per i dettagli."
+            echo "$(date): ATTENZIONE - verifica cifratura fallita per ${BACKUP_FILE} (gpg=${gpg_status}, tar=${tar_status})" >>"${LOG_FILE}"
         fi
     fi
 
@@ -693,6 +939,7 @@ backup() {
     echo "$(date): Backup completato. File: ${BACKUP_FILE}" >>"${LOG_FILE}"
 
     snapshot_cartelle
+    controlla_compose_non_tracciati
 
     # Avviso percorsi mancanti
     if [ ${#MISSING_PATHS[@]} -gt 0 ]; then
@@ -1501,17 +1748,16 @@ while true; do
             ;;
         6)
             start_operation_screen
-            _snapshot_file="${BACKUP_DEST_DIR}/folder_snapshot.txt"
+            _snapshot_file="${BACKUP_DEST_DIR}/folder_snapshot.html"
             if [ -f "$_snapshot_file" ]; then
-                cat "$_snapshot_file"
-                echo ""
-                _pause_if_needed "Premi un tasto per continuare..."
+                if [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ] && command -v xdg-open &>/dev/null; then
+                    xdg-open "$_snapshot_file" 2>/dev/null &
+                    dialog_msgbox "Snapshot aperto nel browser.\n\n${_snapshot_file}" 10 90
+                else
+                    dialog_msgbox "Snapshot disponibile in:\n\n${_snapshot_file}\n\nAprilo con un browser web." 12 90
+                fi
             else
-                echo "❌ Nessuno snapshot disponibile."
-                echo ""
-                echo "Esegui prima un backup."
-                echo ""
-                _pause_if_needed "Premi un tasto per continuare..."
+                dialog_msgbox "❌ Nessuno snapshot disponibile.\n\nEsegui prima un backup." 10 80
             fi
             ;;
         7)
