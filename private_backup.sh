@@ -510,8 +510,8 @@ snapshot_cartelle() {
     local date_str archive_name total_bytes total_bytes_fmt
     local roots_json="" entries path_esc label_esc root_bytes is_dir bytes fpath fp_esc
     local path host_dir hostname userhost item rel
-    local preview_limit_bytes=8192 preview_count=0 preview_count_limit=120
-    local preview_always_bytes=1024
+    local preview_limit_bytes=32768 preview_count=0 preview_count_limit=120
+    local preview_always_bytes=4096
 
     date_str=$(date '+%d/%m/%Y %H:%M:%S')
     archive_name=$(basename "${BACKUP_FILE}")
@@ -787,13 +787,11 @@ function setView(view){
   const tree=document.getElementById('tree');
   const folders=document.getElementById('folders');
   const res=document.getElementById('res');
+  const activeFilter=document.getElementById('flt').value.trim();
   document.getElementById('btn-tree').classList.toggle('on',view==='tree');
   document.getElementById('btn-folder').classList.toggle('on',view==='folder');
-  if(document.getElementById('flt').value.trim()){
-    tree.style.display='none';
-    folders.style.display='none';
-    res.style.display='';
-    updateBreadcrumbs();
+  if(activeFilter){
+    doFilter(activeFilter);
     return;
   }
   tree.style.display=view==='tree'?'':'none';
@@ -950,20 +948,39 @@ function renderFolderFilter(q){
   const re=globRe(q);
   updateBreadcrumbs();
   if(CURRENT_ROOT<0){
-    const roots=ROOTS.map((root,idx)=>({
-      idx,
-      root,
-      name: root.label,
-      path: root.root,
-      bytes: (root.entries||[]).find(e=>e.p===root.root)?.b || 0
-    })).filter(item=>re.test(item.name)||re.test(item.path)||(item.root.host&&re.test(item.root.host)));
-    if(!roots.length){
+    const items=[];
+    const seen=new Set();
+    for(const root of ROOTS){
+      for(const entry of (root.entries||[])){
+        const name=entry.p.split('/').filter(Boolean).pop()||entry.p;
+        if(!re.test(name) && !re.test(entry.p) && !(root.host && re.test(root.host)))continue;
+        if(seen.has(entry.p))continue;
+        seen.add(entry.p);
+        items.push({name,path:entry.p,bytes:+entry.b,isDir:entry.d===1,hasContent:!!entry.c});
+      }
+    }
+    items.sort((a,b)=>{
+      if(a.isDir!==b.isDir)return a.isDir?-1:1;
+      if(b.bytes!==a.bytes)return b.bytes-a.bytes;
+      return a.name.localeCompare(b.name);
+    });
+    if(!items.length){
       el.innerHTML='<div class="empty">Nessun risultato nella vista cartelle.</div>';
       return;
     }
-    let out=`<div class="flsec"><div class="flttl">Origini filtrate (${roots.length})</div><div class="fd">`;
-    for(const item of roots)out+=rootCard(item.root,item.idx);
-    out+='</div></div>';
+    const dirs=items.filter(i=>i.isDir);
+    const files=items.filter(i=>!i.isDir);
+    let out=`<div class="flsec"><div class="flttl">Risultati nella vista cartelle (${items.length})</div></div>`;
+    if(dirs.length){
+      out+=`<div class="flsec"><div class="flttl">&#x1F4C1; Cartelle (${dirs.length})</div><div class="fd">`;
+      for(const item of dirs)out+=folderCard(item);
+      out+='</div></div>';
+    }
+    if(files.length){
+      out+=`<div class="flsec"><div class="flttl">&#x1F4C4; File (${files.length})</div><div class="flgrid">`;
+      for(const item of files)out+=folderCard(item);
+      out+='</div></div>';
+    }
     el.innerHTML=out;
     return;
   }
