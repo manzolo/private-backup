@@ -173,7 +173,12 @@ Estrae un archivio scelto in una sottocartella dedicata dentro `~/backups/privat
 
 `6. Snapshot cartelle`
 
-Genera `~/backups/private/folder_snapshot.html` con:
+Ogni backup genera uno snapshot HTML versionato, ad esempio
+`~/backups/private/<hostname>_private_<timestamp>_folder_snapshot.html`.
+
+Lo snapshot viene anche incluso dentro l'archivio di backup corrispondente.
+
+La voce di menu permette di scegliere un backup e riaprire il suo snapshot con:
 
 - albero locale/remoto
 - dimensioni aggregate
@@ -383,7 +388,12 @@ Decrypts if needed and extracts the selected archive into a dedicated folder ins
 
 `6. Folder Snapshot`
 
-Generates `~/backups/private/folder_snapshot.html` with:
+Each backup generates a versioned HTML snapshot, for example
+`~/backups/private/<hostname>_private_<timestamp>_folder_snapshot.html`.
+
+The snapshot is also embedded inside the matching backup archive.
+
+The menu entry lets you choose a backup and reopen its snapshot with:
 
 - local and remote tree view
 - aggregated sizes

@@ -23,6 +23,8 @@ HOSTNAME_SHORT="$(hostname)"
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 BACKUP_FILE="${BACKUP_DEST_DIR}/${HOSTNAME_SHORT}_private_${TIMESTAMP}.tar.gz"
 CHECKSUM_FILE="${BACKUP_FILE}.sha256"
+SNAPSHOT_FILE="${BACKUP_DEST_DIR}/${HOSTNAME_SHORT}_private_${TIMESTAMP}_folder_snapshot.html"
+LATEST_SNAPSHOT_FILE="${BACKUP_DEST_DIR}/folder_snapshot.html"
 LOG_FILE="${BACKUP_DEST_DIR}/private_backup.log"
 RESTORE_PREVIEW_DIR="${BACKUP_DEST_DIR}/restore"
 REMOTE_STAGE_DIR="${BACKUP_DEST_DIR}/.remote_stage"
@@ -503,10 +505,9 @@ _preview_priority_file() {
 # Funzione: snapshot_cartelle
 # Genera folder_snapshot.html: albero interattivo (stile Baobab)
 # con le dimensioni di tutti i percorsi inclusi nel backup.
-# Sovrascritta ad ogni backup.
+# Versionata per backup e copiata anche come ultimo snapshot.
 # ============================================================
 snapshot_cartelle() {
-    local snapshot_file="${BACKUP_DEST_DIR}/folder_snapshot.html"
     local date_str archive_name total_bytes total_bytes_fmt
     local roots_json="" entries path_esc label_esc root_bytes is_dir bytes fpath fp_esc
     local path host_dir hostname userhost item rel
@@ -515,6 +516,9 @@ snapshot_cartelle() {
 
     date_str=$(date '+%d/%m/%Y %H:%M:%S')
     archive_name=$(basename "${BACKUP_FILE}")
+    if [[ "${BACKUP_ENCRYPT:-false}" == "true" ]]; then
+        archive_name="${archive_name}.gpg"
+    fi
     total_bytes=0
 
     echo "Generazione snapshot HTML interattivo..."
@@ -1141,11 +1145,13 @@ document.addEventListener('DOMContentLoaded',function(){
 </body>
 </html>
 HTMLEOF
-    } > "$snapshot_file"
+    } > "${SNAPSHOT_FILE}"
 
-    echo "📊 Snapshot HTML: ${snapshot_file}"
+    cp -f "${SNAPSHOT_FILE}" "${LATEST_SNAPSHOT_FILE}" 2>/dev/null || true
+
+    echo "📊 Snapshot HTML: ${SNAPSHOT_FILE}"
     if [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ] && command -v xdg-open &>/dev/null; then
-        (setsid xdg-open "$snapshot_file" </dev/null >/dev/null 2>&1 &) >/dev/null 2>&1
+        (setsid xdg-open "${SNAPSHOT_FILE}" </dev/null >/dev/null 2>&1 &) >/dev/null 2>&1
     fi
 }
 
@@ -1348,6 +1354,9 @@ backup() {
         exit 1
     fi
 
+    snapshot_cartelle
+    VALID_INCLUDE_PATHS+=("${SNAPSHOT_FILE}")
+
     # Creazione archivio
     echo "Creazione dell'archivio di backup..."
     echo "$(date): Avvio backup in ${BACKUP_FILE}" >>"${LOG_FILE}"
@@ -1410,7 +1419,6 @@ backup() {
     echo "   Checksum:       ${CHECKSUM_FILE}"
     echo "$(date): Backup completato. File: ${BACKUP_FILE}" >>"${LOG_FILE}"
 
-    snapshot_cartelle
     controlla_compose_non_tracciati
 
     # Avviso percorsi mancanti
@@ -1429,7 +1437,7 @@ backup() {
         grep -v '\.sha256$' | tail -n +$((keep + 1))
     )
     for old in "${old_archives[@]}"; do
-        rm -f "$old" "${old}.sha256"
+        rm -f "$old" "${old}.sha256" "$(snapshot_file_for_archive "$old")"
         echo "$(date): Rimosso vecchio archivio: $old" >>"${LOG_FILE}"
     done
 }
@@ -1445,8 +1453,8 @@ lista_backup() {
     )
 
     if [ ${#BACKUP_FILES[@]} -eq 0 ]; then
-        echo "❌ Nessun backup disponibile in ${BACKUP_DEST_DIR}."
-        exit 1
+        BACKUP_FILES=()
+        return 1
     fi
 
     # Ordina per data di modifica, dal più recente
@@ -1479,13 +1487,24 @@ format_backup_label() {
 
 scegli_backup_dialog() {
     local title="$1"
-    lista_backup
     SELECTED_BACKUP_FILE=""
+    if ! lista_backup; then
+        dialog_msgbox "❌ Nessun backup disponibile in:\n\n${BACKUP_DEST_DIR}" 10 80
+        return 1
+    fi
 
     if [ "${USE_DIALOG}" != true ]; then
         echo "Elenco dei backup privati disponibili:"
         echo ""
-        lista_backup
+        for i in "${!BACKUP_FILES[@]}"; do
+            backup_file="${BACKUP_FILES[$i]}"
+            backup_hostname=$(echo "$backup_file" | sed -E "s|.*/([^/]+)_private_([0-9]{8}_[0-9]{6}).*|\1|")
+            backup_date=$(echo "$backup_file" | sed -E "s|.*/([^/]+)_private_([0-9]{8}_[0-9]{6}).*|\2|")
+            formatted_date=$(date -d "$(echo "$backup_date" | sed 's/_/ /' | \
+                sed 's/\(....\)\(..\)\(..\) \(..\)\(..\)\(..\)/\1-\2-\3 \4:\5:\6/')" \
+                +"%d/%m/%Y %H:%M:%S" 2>/dev/null || echo "$backup_date")
+            echo "$((i + 1))) Data: $formatted_date | Host: $backup_hostname"
+        done
         echo ""
         read -r -p "Scegli un backup (numero): " CHOICE
         [[ "$CHOICE" =~ ^[0-9]+$ ]] || return 1
@@ -1507,6 +1526,59 @@ scegli_backup_dialog() {
     [ $status -eq 0 ] || return 1
     SELECTED_BACKUP_FILE="${BACKUP_FILES[$((choice - 1))]}"
     return 0
+}
+
+snapshot_file_for_archive() {
+    local archive="$1"
+    local base
+    base=$(basename "$archive")
+    base="${base%.gpg}"
+    base="${base%.tar.gz}"
+    printf '%s/%s_folder_snapshot.html\n' "${BACKUP_DEST_DIR}" "$base"
+}
+
+open_snapshot_file() {
+    local snapshot_file="$1"
+    if [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ] && command -v xdg-open &>/dev/null; then
+        (setsid xdg-open "$snapshot_file" </dev/null >/dev/null 2>&1 &) >/dev/null 2>&1
+        dialog_msgbox "Snapshot aperto nel browser.\n\n${snapshot_file}" 10 90
+    else
+        dialog_msgbox "Snapshot disponibile in:\n\n${snapshot_file}\n\nAprilo con un browser web." 12 90
+    fi
+}
+
+visualizza_snapshot_backup() {
+    local archive work_archive tmp_file snapshot_entry archive_base cache_dir snapshot_out
+
+    scegli_backup_dialog "Visualizza snapshot dimensioni cartelle" || return 1
+    archive="$SELECTED_BACKUP_FILE"
+    prepare_archive_workfile "$archive" || return 1
+    work_archive="$PREPARED_WORK_ARCHIVE"
+    tmp_file="$PREPARED_TMP_FILE"
+
+    dialog_infobox "Ricerca snapshot nell'archivio...\n\n$(basename "$archive")" 8 78
+    snapshot_entry="$(tar -tzf "$work_archive" 2>/dev/null | grep -E '(^|/)[^/]+_folder_snapshot\.html$' | head -n 1)"
+    if [ -z "$snapshot_entry" ]; then
+        [ -n "$tmp_file" ] && rm -f "$tmp_file"
+        show_error "❌ Nessuno snapshot HTML trovato nell'archivio selezionato."
+        return 1
+    fi
+
+    archive_base=$(basename "$archive")
+    archive_base="${archive_base%.gpg}"
+    archive_base="${archive_base%.tar.gz}"
+    cache_dir="${RESTORE_PREVIEW_DIR}/snapshots"
+    mkdir -p "$cache_dir"
+    snapshot_out="${cache_dir}/${archive_base}_folder_snapshot.html"
+
+    if ! tar -xOf "$work_archive" "$snapshot_entry" >"$snapshot_out" 2>/dev/null; then
+        [ -n "$tmp_file" ] && rm -f "$tmp_file"
+        show_error "❌ Impossibile estrarre lo snapshot dall'archivio."
+        return 1
+    fi
+
+    [ -n "$tmp_file" ] && rm -f "$tmp_file"
+    open_snapshot_file "$snapshot_out"
 }
 
 # ============================================================
@@ -1887,7 +1959,7 @@ esegui_estrazione() {
 # Funzione: restore
 # ============================================================
 restore() {
-    scegli_backup_dialog "Restore" || exit 1
+    scegli_backup_dialog "Restore" || return 1
     BACKUP_FILE_TO_RESTORE="$SELECTED_BACKUP_FILE"
 
     # Verifica integrità tramite checksum se disponibile
@@ -2034,7 +2106,7 @@ upload() {
         exit 1
     fi
 
-    scegli_backup_dialog "Upload su Google Drive" || exit 1
+    scegli_backup_dialog "Upload su Google Drive" || return 1
     BACKUP_FILE_TO_UPLOAD="$SELECTED_BACKUP_FILE"
     CHECKSUM_TO_UPLOAD="${BACKUP_FILE_TO_UPLOAD}.sha256"
 
@@ -2065,7 +2137,7 @@ upload() {
 # ============================================================
 scompatta() {
     local archive
-    scegli_backup_dialog "Scompatta archivio" || exit 1
+    scegli_backup_dialog "Scompatta archivio" || return 1
     archive="$SELECTED_BACKUP_FILE"
     local base
     base=$(basename "$archive")
@@ -2222,13 +2294,11 @@ while true; do
             ;;
         2)
             start_operation_screen
-            restore
-            finish_operation_notice "Restore completato."
+            restore && finish_operation_notice "Restore completato."
             ;;
         3)
             start_operation_screen
-            upload
-            finish_operation_notice "Upload completato."
+            upload && finish_operation_notice "Upload completato."
             ;;
         4)
             start_operation_screen
@@ -2237,22 +2307,11 @@ while true; do
             ;;
         5)
             start_operation_screen
-            scompatta
-            finish_operation_notice "Scompattazione completata."
+            scompatta && finish_operation_notice "Scompattazione completata."
             ;;
         6)
             start_operation_screen
-            _snapshot_file="${BACKUP_DEST_DIR}/folder_snapshot.html"
-            if [ -f "$_snapshot_file" ]; then
-                if [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ] && command -v xdg-open &>/dev/null; then
-                    (setsid xdg-open "$_snapshot_file" </dev/null >/dev/null 2>&1 &) >/dev/null 2>&1
-                    dialog_msgbox "Snapshot aperto nel browser.\n\n${_snapshot_file}" 10 90
-                else
-                    dialog_msgbox "Snapshot disponibile in:\n\n${_snapshot_file}\n\nAprilo con un browser web." 12 90
-                fi
-            else
-                dialog_msgbox "❌ Nessuno snapshot disponibile.\n\nEsegui prima un backup." 10 80
-            fi
+            visualizza_snapshot_backup && finish_operation_notice "Snapshot aperto."
             ;;
         7)
             start_operation_screen
