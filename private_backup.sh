@@ -806,13 +806,30 @@ function entryName(path){
 function getCurrentRoot(){
   return CURRENT_ROOT>=0?ROOTS[CURRENT_ROOT]:null;
 }
+function findRootIndexForPath(path){
+  for(let i=0;i<ROOTS.length;i++){
+    const root=ROOTS[i];
+    const base=root.root.replace(/\/+$/,'');
+    if(path===root.root || path===base || path.startsWith(base+'/'))return i;
+    if((root.entries||[]).some(e=>e.p===path))return i;
+  }
+  return -1;
+}
+function resetFilterInput(){
+  const flt=document.getElementById('flt');
+  if(flt)flt.value='';
+}
 function openRoot(idx){
   CURRENT_ROOT=idx;
   CURRENT_PATH=ROOTS[idx].root;
+  resetFilterInput();
   renderFolderView();
 }
 function openFolder(path){
+  const idx=findRootIndexForPath(path);
+  if(idx>=0)CURRENT_ROOT=idx;
   CURRENT_PATH=path;
+  resetFilterInput();
   renderFolderView();
 }
 function goUp(){
