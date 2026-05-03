@@ -9,11 +9,19 @@
 # Caricamento configurazione
 CONFIG_FILE="${HOME}/.config/manzolo/private_backup.conf"
 DIALOG_BIN="$(command -v dialog 2>/dev/null || true)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ENV_FILE="${SCRIPT_DIR}/.env"
 
 if [ ! -f "${CONFIG_FILE}" ]; then
     echo "❌ File di configurazione non trovato: ${CONFIG_FILE}"
     echo "   Crea il file con BACKUP_ITEMS, BACKUP_DEST_DIR e RCLONE_REMOTE_PATH."
     exit 1
+fi
+
+if [ -f "${ENV_FILE}" ]; then
+    set -a
+    source "${ENV_FILE}"
+    set +a
 fi
 
 source "${CONFIG_FILE}"
@@ -57,6 +65,8 @@ DIALOG_RESULT=""
 SELECTED_BACKUP_FILE=""
 PREPARED_WORK_ARCHIVE=""
 PREPARED_TMP_FILE=""
+BACKUP_PASSWORD_SOURCE=""
+FORCE_PASSWORD_PROMPT=false
 
 cleanup_dialog_screen() {
     [ "${USE_DIALOG}" = true ] && clear
@@ -333,10 +343,21 @@ chiedi_password() {
     # chiedi_password          → chiede due volte (backup/cifratura)
     # chiedi_password decrypt  → chiede una volta sola (restore/decifratura)
     [ -n "${BACKUP_PASSWORD:-}" ] && return 0
+    if [ "${FORCE_PASSWORD_PROMPT}" != "true" ] && [ -n "${PRIVATE_BACKUP_PASSWORD:-}" ]; then
+        BACKUP_PASSWORD="${PRIVATE_BACKUP_PASSWORD}"
+        BACKUP_PASSWORD_SOURCE="env"
+        return 0
+    fi
     local mode="${1:-}"
+    if [ ! -t 0 ] && [ ! -t 1 ]; then
+        echo "❌ Password non disponibile in modalità non interattiva."
+        echo "   Imposta PRIVATE_BACKUP_PASSWORD in ${ENV_FILE}."
+        exit 1
+    fi
     if [ "$mode" = "decrypt" ]; then
         dialog_passwordbox "Password archivio" "Inserisci la password dell'archivio" || exit 1
         BACKUP_PASSWORD="$DIALOG_RESULT"
+        BACKUP_PASSWORD_SOURCE="prompt"
         if [ -z "$BACKUP_PASSWORD" ]; then
             echo "❌ Password non inserita."
             exit 1
@@ -348,6 +369,7 @@ chiedi_password() {
     while true; do
         dialog_passwordbox "Cifratura backup" "Inserisci la password di cifratura" || exit 1
         BACKUP_PASSWORD="$DIALOG_RESULT"
+        BACKUP_PASSWORD_SOURCE="prompt"
         if [ -z "$BACKUP_PASSWORD" ]; then
             echo "❌ Password non inserita."
             exit 1
@@ -360,6 +382,33 @@ chiedi_password() {
         fi
         show_error "❌ Le password non coincidono.\n\nRiprova."
     done
+}
+
+decrypt_with_retry() {
+    local archive="$1"
+    local output_file="$2"
+
+    gpg_decrypt_to_file "$archive" "$output_file"
+    local status=$?
+    if [ $status -eq 0 ]; then
+        return 0
+    fi
+
+    if [ "${USE_DIALOG}" = true ]; then
+        while true; do
+            show_error "❌ Password errata o archivio corrotto.\n\nRiprova."
+            BACKUP_PASSWORD=""
+            BACKUP_PASSWORD_SOURCE=""
+            FORCE_PASSWORD_PROMPT=true
+            chiedi_password decrypt
+            FORCE_PASSWORD_PROMPT=false
+            gpg_decrypt_to_file "$archive" "$output_file"
+            status=$?
+            [ $status -eq 0 ] && return 0
+        done
+    fi
+
+    return $status
 }
 
 # ============================================================
@@ -1597,7 +1646,7 @@ elenca_file_archivio() {
     if [[ "$archive" == *.gpg ]]; then
         chiedi_password decrypt
         tmp_file=$(mktemp /tmp/private_backup_XXXXXX.tar.gz)
-        gpg_decrypt_to_file "$archive" "$tmp_file"
+        decrypt_with_retry "$archive" "$tmp_file"
         if [ $? -ne 0 ]; then
             show_error "❌ Decifratura fallita.\n\nPassword errata o archivio non leggibile."
             rm -f "$tmp_file"
@@ -1632,7 +1681,7 @@ prepare_archive_workfile() {
     if [[ "$archive" == *.gpg ]]; then
         chiedi_password decrypt
         tmp_file=$(mktemp /tmp/private_backup_XXXXXX.tar.gz)
-        gpg_decrypt_to_file "$archive" "$tmp_file"
+        decrypt_with_retry "$archive" "$tmp_file"
         if [ $? -ne 0 ]; then
             show_error "❌ Decifratura fallita.\n\nPassword errata o archivio non leggibile."
             rm -f "$tmp_file"
@@ -1930,7 +1979,7 @@ esegui_estrazione() {
         chiedi_password decrypt
         tmp_file=$(mktemp /tmp/private_backup_XXXXXX.tar.gz)
         echo "Decifratura archivio..."
-        gpg_decrypt_to_file "$archive" "$tmp_file"
+        decrypt_with_retry "$archive" "$tmp_file"
         if [ $? -ne 0 ]; then
             show_error "❌ Decifratura fallita.\n\nPassword errata o archivio non leggibile."
             rm -f "$tmp_file"
@@ -2093,7 +2142,7 @@ restore() {
     local tmp_for_remote=""
     if [[ "$BACKUP_FILE_TO_RESTORE" == *.gpg ]]; then
         tmp_for_remote=$(mktemp /tmp/private_backup_XXXXXX.tar.gz)
-        gpg_decrypt_to_file "$BACKUP_FILE_TO_RESTORE" "$tmp_for_remote"
+        decrypt_with_retry "$BACKUP_FILE_TO_RESTORE" "$tmp_for_remote"
         work_for_remote="$tmp_for_remote"
     fi
     ripristina_remoto "$work_for_remote"
@@ -2246,9 +2295,42 @@ backup_e_upload() {
     echo "$(date): Backup+upload completati. ${BACKUP_FILE} -> ${REMOTE_ARCHIVE}" >>"${LOG_FILE}"
 }
 
-# ============================================================
-# Menu principale
-# ============================================================
+run_cli_action() {
+    local action="$1"
+    case "$action" in
+        backup)
+            backup
+            ;;
+        restore)
+            restore
+            ;;
+        upload)
+            upload
+            ;;
+        backup-upload)
+            backup_e_upload
+            ;;
+        scompatta)
+            scompatta
+            ;;
+        snapshot)
+            visualizza_snapshot_backup
+            ;;
+        explore)
+            esplora_backup
+            ;;
+        *)
+            echo "Uso: $0 [backup|restore|upload|backup-upload|scompatta|snapshot|explore]"
+            exit 1
+            ;;
+    esac
+}
+
+if [ $# -gt 0 ]; then
+    run_cli_action "$1"
+    exit $?
+fi
+
 while true; do
     if [ "${USE_DIALOG}" = true ]; then
         dialog_menu "PrivateBackup" "Configurazione: ${CONFIG_FILE}\nDestinazione: ${BACKUP_DEST_DIR}\nRemote rclone: ${RCLONE_REMOTE_PATH}" \

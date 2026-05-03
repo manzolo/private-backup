@@ -1,6 +1,7 @@
 *.tar.gz
 *.tar.gz.gpg
 *.sha256
+.env
 private_backup.log
 folder_snapshot.txt
 .remote_stage/
