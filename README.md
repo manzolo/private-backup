@@ -45,6 +45,14 @@ $EDITOR ~/.config/manzolo/private_backup.conf
 bash private_backup.sh
 ```
 
+Modalita CLI senza TUI:
+
+```bash
+bash private_backup.sh --non-interactive backup
+bash private_backup.sh --non-interactive backup-upload
+bash private_backup.sh --non-interactive --latest upload
+```
+
 Menu principale:
 
 ```text
@@ -203,6 +211,29 @@ sha256sum -c ~/backups/private/<hostname>_private.tar.gz.gpg.sha256
 bash private_backup.sh
 ```
 
+### Uso con crontab
+
+Per `cron` usa la modalita non interattiva. Se `BACKUP_ENCRYPT=true`, la password deve essere disponibile via variabile ambiente `PRIVATE_BACKUP_PASSWORD`, ad esempio nel file `.env` accanto allo script.
+In questa modalita lo script non prova ad aprire automaticamente il browser per gli snapshot HTML.
+
+Esempio:
+
+```bash
+PRIVATE_BACKUP_PASSWORD="una-password-lunga"
+```
+
+`crontab -e`:
+
+```cron
+0 3 * * * /bin/bash /home/manzolo/backups/private-backup/private_backup.sh --non-interactive backup-upload >> /home/manzolo/backups/private-backup/cron.log 2>&1
+```
+
+Per caricare separatamente l'ultimo archivio creato:
+
+```cron
+15 3 * * * /bin/bash /home/manzolo/backups/private-backup/private_backup.sh --non-interactive --latest upload >> /home/manzolo/backups/private-backup/cron.log 2>&1
+```
+
 ### Note tecniche
 
 - Nessun `rsync` sul remoto: il pull usa `ssh + tar`
@@ -212,6 +243,8 @@ bash private_backup.sh
 - `tar --warning=no-file-ignored` evita errori sui socket GPG
 - `chmod -R u+rwX` rende gestibili i file remoti estratti con permessi restrittivi
 - la password GPG passa via file descriptor con `--pinentry-mode loopback`
+- `--non-interactive` e alias `--cron` evitano menu TUI e input non compatibili con `crontab`
+- `--latest` seleziona automaticamente il backup piu recente per operazioni come `upload`
 
 ### Licenza
 

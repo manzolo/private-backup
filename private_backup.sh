@@ -12,6 +12,27 @@ DIALOG_BIN="$(command -v dialog 2>/dev/null || true)"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE="${SCRIPT_DIR}/.env"
 
+early_print_usage() {
+    cat <<EOF
+Uso: $0 [opzioni] [backup|restore|upload|backup-upload|scompatta|snapshot|explore]
+
+Opzioni:
+  --non-interactive, --cron  Disabilita TUI e prompt non adatti a cron
+  --latest                   Usa automaticamente il backup più recente
+  --archive PATH             Usa un archivio specifico
+  -h, --help                 Mostra questo aiuto
+EOF
+}
+
+for arg in "$@"; do
+    case "$arg" in
+        -h|--help)
+            early_print_usage
+            exit 0
+            ;;
+    esac
+done
+
 if [ ! -f "${CONFIG_FILE}" ]; then
     echo "❌ File di configurazione non trovato: ${CONFIG_FILE}"
     echo "   Crea il file con BACKUP_ITEMS, BACKUP_DEST_DIR e RCLONE_REMOTE_PATH."
@@ -67,6 +88,9 @@ PREPARED_WORK_ARCHIVE=""
 PREPARED_TMP_FILE=""
 BACKUP_PASSWORD_SOURCE=""
 FORCE_PASSWORD_PROMPT=false
+NON_INTERACTIVE=false
+SELECT_LATEST_BACKUP=false
+EXPLICIT_BACKUP_FILE=""
 
 cleanup_dialog_screen() {
     [ "${USE_DIALOG}" = true ] && clear
@@ -1204,7 +1228,7 @@ HTMLEOF
     cp -f "${SNAPSHOT_FILE}" "${LATEST_SNAPSHOT_FILE}" 2>/dev/null || true
 
     echo "📊 Snapshot HTML: ${SNAPSHOT_FILE}"
-    if [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ] && command -v xdg-open &>/dev/null; then
+    if [ "${NON_INTERACTIVE}" != "true" ] && [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ] && command -v xdg-open &>/dev/null; then
         (setsid xdg-open "${SNAPSHOT_FILE}" </dev/null >/dev/null 2>&1 &) >/dev/null 2>&1
     fi
 }
@@ -1581,6 +1605,30 @@ scegli_backup_dialog() {
     return 0
 }
 
+select_backup_file() {
+    local title="${1:-Seleziona backup}"
+
+    if [ -n "${EXPLICIT_BACKUP_FILE}" ]; then
+        if [ -f "${EXPLICIT_BACKUP_FILE}" ]; then
+            SELECTED_BACKUP_FILE="${EXPLICIT_BACKUP_FILE}"
+            return 0
+        fi
+        echo "❌ Archivio specificato non trovato: ${EXPLICIT_BACKUP_FILE}"
+        return 1
+    fi
+
+    if [ "${SELECT_LATEST_BACKUP}" = true ]; then
+        if ! lista_backup; then
+            echo "❌ Nessun backup disponibile in: ${BACKUP_DEST_DIR}"
+            return 1
+        fi
+        SELECTED_BACKUP_FILE="${BACKUP_FILES[0]}"
+        return 0
+    fi
+
+    scegli_backup_dialog "$title"
+}
+
 snapshot_file_for_archive() {
     local archive="$1"
     local base
@@ -1592,7 +1640,9 @@ snapshot_file_for_archive() {
 
 open_snapshot_file() {
     local snapshot_file="$1"
-    if [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ] && command -v xdg-open &>/dev/null; then
+    if [ "${NON_INTERACTIVE}" = "true" ]; then
+        echo "Snapshot disponibile in: ${snapshot_file}"
+    elif [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ] && command -v xdg-open &>/dev/null; then
         (setsid xdg-open "$snapshot_file" </dev/null >/dev/null 2>&1 &) >/dev/null 2>&1
         dialog_msgbox "Snapshot aperto nel browser.\n\n${snapshot_file}" 10 90
     else
@@ -1603,7 +1653,7 @@ open_snapshot_file() {
 visualizza_snapshot_backup() {
     local archive work_archive tmp_file snapshot_entry archive_base cache_dir snapshot_out
 
-    scegli_backup_dialog "Visualizza snapshot dimensioni cartelle" || return 1
+    select_backup_file "Visualizza snapshot dimensioni cartelle" || return 1
     archive="$SELECTED_BACKUP_FILE"
     prepare_archive_workfile "$archive" || return 1
     work_archive="$PREPARED_WORK_ARCHIVE"
@@ -2012,7 +2062,7 @@ esegui_estrazione() {
 # Funzione: restore
 # ============================================================
 restore() {
-    scegli_backup_dialog "Restore" || return 1
+    select_backup_file "Restore" || return 1
     BACKUP_FILE_TO_RESTORE="$SELECTED_BACKUP_FILE"
 
     # Verifica integrità tramite checksum se disponibile
@@ -2159,7 +2209,7 @@ upload() {
         exit 1
     fi
 
-    scegli_backup_dialog "Upload su Google Drive" || return 1
+    select_backup_file "Upload su Google Drive" || return 1
     BACKUP_FILE_TO_UPLOAD="$SELECTED_BACKUP_FILE"
     CHECKSUM_TO_UPLOAD="${BACKUP_FILE_TO_UPLOAD}.sha256"
 
@@ -2190,7 +2240,7 @@ upload() {
 # ============================================================
 scompatta() {
     local archive
-    scegli_backup_dialog "Scompatta archivio" || return 1
+    select_backup_file "Scompatta archivio" || return 1
     archive="$SELECTED_BACKUP_FILE"
     local base
     base=$(basename "$archive")
@@ -2237,7 +2287,7 @@ scompatta() {
 
 esplora_backup() {
     local archive
-    scegli_backup_dialog "Esplora backup" || return 1
+    select_backup_file "Esplora backup" || return 1
     archive="$SELECTED_BACKUP_FILE"
     if [ "${USE_DIALOG}" = true ]; then
         browse_archive_dialog "$archive" "browse"
@@ -2326,8 +2376,65 @@ run_cli_action() {
     esac
 }
 
+print_usage() {
+    cat <<EOF
+Uso: $0 [opzioni] [backup|restore|upload|backup-upload|scompatta|snapshot|explore]
+
+Opzioni:
+  --non-interactive, --cron  Disabilita TUI e prompt non adatti a cron
+  --latest                   Usa automaticamente il backup più recente
+  --archive PATH             Usa un archivio specifico
+  -h, --help                 Mostra questo aiuto
+EOF
+}
+
+parse_cli_args() {
+    CLI_ACTION=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --non-interactive|--cron)
+                NON_INTERACTIVE=true
+                USE_DIALOG=false
+                ;;
+            --latest)
+                SELECT_LATEST_BACKUP=true
+                ;;
+            --archive)
+                shift
+                if [ -z "${1:-}" ]; then
+                    echo "❌ Manca il percorso dopo --archive"
+                    exit 1
+                fi
+                EXPLICIT_BACKUP_FILE="$1"
+                ;;
+            -h|--help)
+                print_usage
+                exit 0
+                ;;
+            backup|restore|upload|backup-upload|scompatta|snapshot|explore)
+                if [ -n "${CLI_ACTION}" ]; then
+                    echo "❌ Azione già specificata: ${CLI_ACTION}"
+                    exit 1
+                fi
+                CLI_ACTION="$1"
+                ;;
+            *)
+                echo "❌ Opzione o azione non riconosciuta: $1"
+                print_usage
+                exit 1
+                ;;
+        esac
+        shift
+    done
+}
+
 if [ $# -gt 0 ]; then
-    run_cli_action "$1"
+    parse_cli_args "$@"
+    [ -n "${CLI_ACTION}" ] || {
+        print_usage
+        exit 1
+    }
+    run_cli_action "${CLI_ACTION}"
     exit $?
 fi
 
